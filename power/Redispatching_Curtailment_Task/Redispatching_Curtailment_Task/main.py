@@ -1,5 +1,13 @@
 
 import os
+
+# BLAS threading has to be pinned before torch/numpy are imported. Every collector env is a
+# forked process; without this each one spawns a full thread pool and they fight over the
+# same cores, which is slower than running serially. setdefault, so an explicit export wins.
+for _thread_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                    "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_thread_var, "1")
+
 import yaml
 import argparse
 import gc
@@ -25,16 +33,14 @@ def n_envs_arg(value):
 
 
 def resolve_n_envs(n_envs, frames_per_batch):
-    """Collection is split evenly across n_envs workers, so it must divide frames_per_batch."""
-    if n_envs is None:
-        return 10 if IS_LINUX else 1
-    if n_envs == "auto":
-        n_cpus = available_cpus()
-        return max(d for d in range(1, frames_per_batch + 1)
-                   if frames_per_batch % d == 0 and d <= n_cpus)
-    if frames_per_batch % n_envs != 0:
-        raise ValueError(f"--n_envs ({n_envs}) must divide --frames_per_batch ({frames_per_batch}).")
-    return n_envs
+    """Collection is split evenly across workers, so the worker count has to divide
+    frames_per_batch. Round the request down to the nearest divisor rather than failing:
+    asking for 32 on a 32-core node quietly gives 30, which is what you want anyway.
+    Returns (resolved, requested)."""
+    requested = available_cpus() if n_envs in (None, "auto") else n_envs
+    requested = max(1, min(requested, frames_per_batch))
+    resolved = max(d for d in range(1, requested + 1) if frames_per_batch % d == 0)
+    return resolved, requested
 
 
 def cli():
@@ -64,10 +70,10 @@ def cli():
                                 can be heavy because the buffer is also saved in it. (default: False)""")
     parser.add_argument('--evaluate_agents', action='store_true',
                         help="Whether or not to evaluate the trained agents. (default: False)")
-    parser.add_argument('--n_envs', type=n_envs_arg, default=None,
-                        help="""Number of environments collected in parallel, or "auto" to use
-                                the largest divisor of frames_per_batch that fits in the allocated
-                                cores. Defaults to 10 on Linux, 1 otherwise.""")
+    parser.add_argument('--n_envs', type=n_envs_arg, default="auto",
+                        help="""Number of CPUs to collect on, i.e. how many environments run in
+                                parallel. Rounded down to the nearest divisor of frames_per_batch.
+                                "auto" (default) uses every core allocated to the job.""")
     parser.add_argument('--n_train_threads', type=int, default=None,
                         help="""Torch intra-op threads for the optimizer loop. Only takes effect
                                 once the collector workers exist, so they stay single-threaded
@@ -120,9 +126,13 @@ if __name__ == "__main__":
     args_dict = vars(args)
     n_frames, lr, gamma, frames_per_batch, MAPPO_n_episode, MASAC_n_optimizer_steps, MASAC_train_batch_size, seeds, alg, save_experiment, evaluate_agents, n_envs, n_train_threads = args_dict.values()
 
-    n_envs = resolve_n_envs(n_envs, frames_per_batch)
-    print(f"Collecting with {n_envs} parallel envs on {available_cpus()} allocated cores "
-          f"({frames_per_batch // n_envs} frames per env per iteration).")
+    n_envs, n_cpus_requested = resolve_n_envs(n_envs, frames_per_batch)
+    print(f"[parallelism] {available_cpus()} cores visible, {n_cpus_requested} requested, "
+          f"running {n_envs} collector processes "
+          f"x {frames_per_batch // n_envs} frames = {frames_per_batch} per iteration "
+          f"(OMP_NUM_THREADS={os.environ['OMP_NUM_THREADS']}).")
+    if not IS_LINUX:
+        print("[parallelism] WARNING: parallel collection is Linux-only; falling back to serial.")
 
     # Loads from "benchmarl/conf/experiment/base_experiment.yaml"
     experiment_config = ExperimentConfig.get_from_yaml() # 
