@@ -1,6 +1,6 @@
 experiment:
   keep_checkpoints_num: null
-  loggers: []
+  loggers: ["csv"]  # writes timers/collection_time vs timers/training_time; use [] on Windows
   render: False
   evaluation: False
   on_policy_n_envs_per_worker: 1

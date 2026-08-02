@@ -3,6 +3,7 @@ import os
 import yaml
 import argparse
 import gc
+import torch
 from benchmarl.algorithms import MappoConfig, MasacConfig
 from benchmarl.environments import G2OpPowerGridTask
 from benchmarl.experiment import Experiment, ExperimentConfig
@@ -11,6 +12,30 @@ import grid2op
 from utils import ROOT_DIR, G2OP_ENV_DIR, IS_LINUX
 from BMMAAgent import BMMAAgent
 from evaluate import evaluate
+
+def available_cpus():
+    """Cores actually allocated to this process (respects the SLURM/cgroup cpuset)."""
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
+
+
+def n_envs_arg(value):
+    return value if value == "auto" else int(value)
+
+
+def resolve_n_envs(n_envs, frames_per_batch):
+    """Collection is split evenly across n_envs workers, so it must divide frames_per_batch."""
+    if n_envs is None:
+        return 10 if IS_LINUX else 1
+    if n_envs == "auto":
+        n_cpus = available_cpus()
+        return max(d for d in range(1, frames_per_batch + 1)
+                   if frames_per_batch % d == 0 and d <= n_cpus)
+    if frames_per_batch % n_envs != 0:
+        raise ValueError(f"--n_envs ({n_envs}) must divide --frames_per_batch ({frames_per_batch}).")
+    return n_envs
+
 
 def cli():
     parser = argparse.ArgumentParser(description="Train some agents.")
@@ -39,12 +64,18 @@ def cli():
                                 can be heavy because the buffer is also saved in it. (default: False)""")
     parser.add_argument('--evaluate_agents', action='store_true',
                         help="Whether or not to evaluate the trained agents. (default: False)")
-    parser.add_argument('--n_envs', type=int, default=None,
-                        help="""Number of environments collected in parallel. Must divide
-                                frames_per_batch. Defaults to 10 on Linux, 1 otherwise.""")
+    parser.add_argument('--n_envs', type=n_envs_arg, default=None,
+                        help="""Number of environments collected in parallel, or "auto" to use
+                                the largest divisor of frames_per_batch that fits in the allocated
+                                cores. Defaults to 10 on Linux, 1 otherwise.""")
+    parser.add_argument('--n_train_threads', type=int, default=None,
+                        help="""Torch intra-op threads for the optimizer loop. Only takes effect
+                                once the collector workers exist, so they stay single-threaded
+                                under OMP_NUM_THREADS=1. (default: leave unchanged)""")
     return parser.parse_args()
 
-def train_algo(task, algorithm_config, model_config, critic_model_config, experiment_config, seed, evaluate_agent):
+def train_algo(task, algorithm_config, model_config, critic_model_config, experiment_config, seed, evaluate_agent,
+               n_train_threads=None):
         print("Creating experiment...")
         experiment = Experiment(
             task=task,
@@ -54,6 +85,10 @@ def train_algo(task, algorithm_config, model_config, critic_model_config, experi
             seed=seed,
             config=experiment_config,
         )
+        # The optimizer loop runs here in the parent, so it can use more threads than the
+        # collector workers. Set this only after the collector (and its workers) exist.
+        if n_train_threads is not None:
+            torch.set_num_threads(n_train_threads)
         print("Starting training...")
         experiment.run()
         experiment.close()
@@ -83,12 +118,11 @@ if __name__ == "__main__":
 
     args = cli()
     args_dict = vars(args)
-    n_frames, lr, gamma, frames_per_batch, MAPPO_n_episode, MASAC_n_optimizer_steps, MASAC_train_batch_size, seeds, alg, save_experiment, evaluate_agents, n_envs = args_dict.values()
+    n_frames, lr, gamma, frames_per_batch, MAPPO_n_episode, MASAC_n_optimizer_steps, MASAC_train_batch_size, seeds, alg, save_experiment, evaluate_agents, n_envs, n_train_threads = args_dict.values()
 
-    if n_envs is None:
-        n_envs = 10 if IS_LINUX else 1
-    if frames_per_batch % n_envs != 0:
-        raise ValueError(f"--n_envs ({n_envs}) must divide --frames_per_batch ({frames_per_batch}).")
+    n_envs = resolve_n_envs(n_envs, frames_per_batch)
+    print(f"Collecting with {n_envs} parallel envs on {available_cpus()} allocated cores "
+          f"({frames_per_batch // n_envs} frames per env per iteration).")
 
     # Loads from "benchmarl/conf/experiment/base_experiment.yaml"
     experiment_config = ExperimentConfig.get_from_yaml() # 
@@ -152,5 +186,6 @@ if __name__ == "__main__":
 
     for i, seed in enumerate(seeds):
         print(f"Running experiment {i + 1}/{len(seeds)}.")
-        train_algo(task, algorithm_config, model_config, critic_model_config, experiment_config, seed, evaluate_agents)
+        train_algo(task, algorithm_config, model_config, critic_model_config, experiment_config, seed, evaluate_agents,
+                   n_train_threads=n_train_threads)
         gc.collect()
