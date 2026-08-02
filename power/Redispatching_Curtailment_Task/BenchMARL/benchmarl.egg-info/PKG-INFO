@@ -1,0 +1,31 @@
+Metadata-Version: 2.4
+Name: benchmarl
+Version: 1.4.0
+Summary: BenchMARL
+Home-page: https://github.com/facebookresearch/BenchMARL
+Author: Matteo Bettini
+Author-email: mb2389@cl.cam.ac.uk
+License-File: LICENSE
+Requires-Dist: torchrl~=0.7.0
+Requires-Dist: tqdm
+Requires-Dist: hydra-core
+Requires-Dist: torchvision
+Requires-Dist: av<14
+Provides-Extra: vmas
+Requires-Dist: vmas>=1.3.4; extra == "vmas"
+Provides-Extra: pettingzoo
+Requires-Dist: pettingzoo[all]>=1.24.3; extra == "pettingzoo"
+Provides-Extra: meltingpot
+Requires-Dist: dm-meltingpot; extra == "meltingpot"
+Provides-Extra: gnn
+Requires-Dist: torch_geometric; extra == "gnn"
+Provides-Extra: logging
+Requires-Dist: moviepy; extra == "logging"
+Requires-Dist: wandb; extra == "logging"
+Dynamic: author
+Dynamic: author-email
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: summary

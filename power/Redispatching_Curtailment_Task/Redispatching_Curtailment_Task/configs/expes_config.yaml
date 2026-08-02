@@ -1,0 +1,21 @@
+experiment:
+  keep_checkpoints_num: null
+  loggers: []
+  render: False
+  evaluation: False
+  on_policy_n_envs_per_worker: 1
+
+
+task:
+  config:
+    regex_filter_chronics: ".*-02-.*$"
+
+algorithm: {}
+
+model: {}
+
+critic_model: {}
+
+
+
+

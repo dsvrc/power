@@ -1,0 +1,53 @@
+{
+    "state_attrs": {
+        "default": ["gen_p",  "gen_theta", "load_p", "load_theta", "rho", "time_before_cooldown_line"],     
+
+        "topology": ["topo_vect", "line_status", "timestep_overflow", "time_before_cooldown_sub"],
+
+        "redispatch": ["target_dispatch", "actual_dispatch", "gen_margin_up", "gen_margin_down"],
+
+        "curtailment": ["gen_p_before_curtail", "curtailment", "curtailment_limit"],
+
+        "maintenance": ["time_next_maintenance", "duration_next_maintenance"],
+
+        "storage": ["storage_charge", "storage_power_target", "storage_power", "storage_theta"],
+
+        "extra": ["gen_v", "load_v", "gen_q", "load_q", "p_or", "q_or", "v_or", "a_or", "theta_or", "p_ex", "q_ex", "v_ex", "a_ex", "theta_ex"]
+    },
+
+    "environments": {
+        "bus14": {
+            "grid2op_id": "l2rpn_case14_sandbox",
+            "n_line": 20,
+            "renewable": true,
+            "curtail": true,
+            "maintenance": false,
+            "opponent": false,
+            "battery": false,
+            "agent_stations": [[0, 1, 2, 4], [3, 6, 7, 8], [5, 9, 10, 11, 12, 13]]
+        },
+
+        "bus36": {
+            "grid2op_id": "l2rpn_neurips_2020_track1_small",
+            "n_line": 59,
+            "renewable": true,
+            "curtail": false,
+            "maintenance": true,
+            "opponent": true,
+            "battery": false,
+            "agent_stations": [[0, 1, 2, 3, 4], [6, 7, 8, 9, 16], [5, 10, 11, 12, 13, 14, 15, 32, 35], [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33, 34]]
+        },
+
+        "bus118": {
+            "grid2op_id": "l2rpn_idf_2023",
+            "n_line": 186,
+            "renewable": true,
+            "curtail": true,
+            "maintenance": true,
+            "opponent": true,
+            "battery": true,
+            "agent_stations": [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 116], [14, 16, 17, 18, 29, 32, 37], [33, 34, 35, 36], [38, 39, 40, 41], [42, 43, 44, 45, 46, 47], [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 65, 66], [23, 64, 70, 71, 72], [67, 68, 69, 73, 74, 75, 76, 77, 78, 80, 115, 117], [79, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101], [102, 103, 104, 105, 106, 107, 108, 109, 110, 111], [19, 20, 21, 22, 24, 25, 26, 27, 28, 30, 31, 112, 113, 114]]
+        }
+    }
+
+}

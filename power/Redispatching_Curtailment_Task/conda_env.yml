@@ -1,0 +1,8 @@
+name: marl2grid_todel
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -r requirements.txt
