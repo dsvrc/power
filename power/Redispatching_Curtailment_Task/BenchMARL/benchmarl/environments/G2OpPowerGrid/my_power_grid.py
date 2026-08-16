@@ -18,3 +18,6 @@ class TaskConfig:
     regex_filter_chronics: str = MISSING
     safe_max_rho: float = MISSING
     curtail_margin: float = MISSING
+    # PACT-1 settings.  Empty dict (the default) leaves the task byte-identical
+    # to the published one, so the blind arm cannot differ by construction.
+    pact1: dict = MISSING

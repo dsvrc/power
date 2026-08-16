@@ -63,8 +63,23 @@ def cli():
                                 with MASAC. (default: 128)""")
     parser.add_argument('--seeds', type=int, default=[0, 1, 2], nargs='+',
                         help="Random seeds (default: [0, 1, 2])")
-    parser.add_argument('--alg', type=str, default="MAPPO", choices=["MAPPO", "MASAC"],
-                        help="Whether to train with MAPPO or MASAC. (default: MAPPO)")
+    parser.add_argument('--alg', type=str, default="MAPPO",
+                        choices=["MAPPO", "MASAC", "PACT1"],
+                        help="""MAPPO, MASAC, or PACT1. PACT1 is MAPPO as host with the
+                                PACT-1 estimator/compensator wrapped around the env, so
+                                the two share host hyperparameters exactly and 'MAPPO'
+                                is the matched blind arm. (default: MAPPO)""")
+    parser.add_argument('--pact1_trust', type=float, default=0.90,
+                        help="""PACT-1 trust prior. Initialise NEAR the optimum and let
+                                the policy pull it down -- a hedged 0.5 measured ~1800
+                                return worse on Ant with a correct waveform. (default: 0.90)""")
+    parser.add_argument('--pact1_gate', type=str, default="prediction",
+                        choices=["prediction", "prediction_only", "trace", "none"],
+                        help="""Confidence gate. 'prediction' (default) = prediction gate
+                                x divisor gate x readiness. 'trace' is the known-bad gate,
+                                kept runnable as an ablation. (default: prediction)""")
+    parser.add_argument('--pact1_log', type=str, default="pact_debug.csv",
+                        help="PACT-1 diagnostics CSV. Read applied_trust first.")
     parser.add_argument('--save_experiment', action='store_true', 
                         help="""Whether or not to save the experiment. Note that a MASAC checkpoint
                                 can be heavy because the buffer is also saved in it. (default: False)""")
@@ -123,8 +138,21 @@ if __name__ == "__main__":
         mp.set_start_method("fork", force=True)
 
     args = cli()
-    args_dict = vars(args)
-    n_frames, lr, gamma, frames_per_batch, MAPPO_n_episode, MASAC_n_optimizer_steps, MASAC_train_batch_size, seeds, alg, save_experiment, evaluate_agents, n_envs, n_train_threads = args_dict.values()
+    # Explicit, not positional: unpacking vars(args).values() silently
+    # misassigns every field the moment an argument is inserted.
+    n_frames = args.n_frames
+    lr = args.lr
+    gamma = args.gamma
+    frames_per_batch = args.frames_per_batch
+    MAPPO_n_episode = args.MAPPO_n_episode
+    MASAC_n_optimizer_steps = args.MASAC_n_optimizer_steps
+    MASAC_train_batch_size = args.MASAC_train_batch_size
+    seeds = args.seeds
+    alg = args.alg
+    save_experiment = args.save_experiment
+    evaluate_agents = args.evaluate_agents
+    n_envs = args.n_envs
+    n_train_threads = args.n_train_threads
 
     n_envs, n_cpus_requested = resolve_n_envs(n_envs, frames_per_batch)
     print(f"[parallelism] {available_cpus()} cores visible, {n_cpus_requested} requested, "
@@ -141,14 +169,24 @@ if __name__ == "__main__":
     task = G2OpPowerGridTask.MY_POWER_GRID.get_from_yaml()
     task.config["env_name"] = os.path.join(G2OP_ENV_DIR, "l2rpn_idf_2023")
 
-    if alg == "MAPPO":
-        # Loads from "benchmarl/conf/algorithm/mappo.yaml"
+    if alg in ("MAPPO", "PACT1"):
+        # PACT-1 uses MAPPO as its host, unmodified. The host algorithm is
+        # never touched (III.4): PACT-1 lives entirely in an env wrapper, so
+        # `--alg MAPPO` is the exactly-matched blind baseline.
         algorithm_config = MappoConfig.get_from_yaml()
     elif alg == "MASAC":
         # Loads from "benchmarl/conf/algorithm/masac.yaml"
         algorithm_config = MasacConfig.get_from_yaml()
     else:
         raise ValueError(f"Unknown algorithm: {alg}")
+
+    if alg == "PACT1":
+        task.config["pact1"] = {
+            "enabled": True,
+            "trust": args.pact1_trust,
+            "gate": args.pact1_gate,
+            "log": os.path.join(ROOT_DIR, args.pact1_log),
+        }
     
     # Loads from "benchmarl/conf/model/layers/mlp.yaml"
     model_config = MlpConfig.get_from_yaml()
@@ -175,7 +213,7 @@ if __name__ == "__main__":
 
     experiment_config.parallel_collection = IS_LINUX
 
-    if alg == "MAPPO":
+    if alg in ("MAPPO", "PACT1"):
         experiment_config.on_policy_n_envs_per_worker = n_envs
         experiment_config.on_policy_collected_frames_per_batch = frames_per_batch
         experiment_config.on_policy_minibatch_size = experiment_config.on_policy_collected_frames_per_batch

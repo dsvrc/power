@@ -13,3 +13,5 @@ shuffle_chronics: True
 regex_filter_chronics: null
 safe_max_rho: 0.9
 curtail_margin: 30
+# PACT-1 off by default: the plain config IS the blind arm, byte for byte.
+pact1: {}

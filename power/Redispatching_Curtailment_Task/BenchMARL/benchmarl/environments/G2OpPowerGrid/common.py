@@ -36,7 +36,17 @@ class G2OpPowerGridClass(TaskClass):
         device: DEVICE_TYPING,
     ) -> Callable[[], EnvBase]:
         config = copy.deepcopy(self.config)
-        env_pz = PZMAEnvRecoDNLimit(**config)
+        # PACT-1 is an environment wrapper, never a change to the host
+        # algorithm (III.4), so every arm shares host hyperparameters and an
+        # arm difference cannot be an algorithm difference.  With pact1 absent
+        # or disabled this is byte-identical to the published task.
+        pact1_cfg = config.pop("pact1", None) or {}
+        if pact1_cfg.get("enabled", False):
+            from .pact1.env import PACT1Env
+            env_pz = PACT1Env(**{f"pact1_{k}" if not k.startswith("pact1_") else k: v
+                                 for k, v in pact1_cfg.items()}, **config)
+        else:
+            env_pz = PZMAEnvRecoDNLimit(**config)
         return lambda: PettingZooWrapper(
             env_pz,
             categorical_actions=False,
