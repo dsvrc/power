@@ -24,6 +24,14 @@ COLUMNS = [
     "sat_frac",                   # compensation hitting the [0,1] rail
     "A_mean", "A_min", "A_max",   # the native driver: grid stress
     "rho_mean", "rho_max",
+    # Is there anything to identify at all?  If the exertion functional never
+    # moves, phi is constant, the peer columns are collinear with the intercept
+    # and fit_gain is 0 BY CONSTRUCTION -- no estimator can help.  Log this
+    # before concluding anything about the method from a flat fit_gain.
+    "phi_mean", "phi_std", "phi_frac_active",
+    "own_col_std",                # own-action excitation, drives the divisor gate
+    "rho_own_mean", "rho_own_max",  # the sensor's own-zone aggregate
+    "g2op_per_gym",               # grid2op steps consumed per agent decision
     "n_eff_r",
 ]
 

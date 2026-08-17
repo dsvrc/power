@@ -57,6 +57,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                  pact1_own_gain_floor=1e-3,
                  pact1_gate="prediction",   # "prediction" | "trace" (ablation) | "none"
                  pact1_hp_tau=2000.0,       # standing-level EMA, in env steps
+                 pact1_sensor="mean",       # "mean" | "max" over the zone's own lines
                  pact1_log=None,
                  pact1_log_every=200,
                  pact1_matched_band=(0.69, 0.70),
@@ -68,6 +69,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         self.max_delta = float(pact1_max_delta)
         self.own_gain_floor = float(pact1_own_gain_floor)
         self.gate_kind = str(pact1_gate)
+        self.sensor_kind = str(pact1_sensor)
         self.log_every = int(pact1_log_every)
 
         # Zone agents only.  The global redispatching_agent acts on every gen
@@ -114,6 +116,9 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         self._ell_max_seen = 0.0
         self._A_window = []
         self._psi_hist = []
+        self._phi_hist = []
+        self._own_col_hist = []
+        self._g2op_steps = []
         self._step = 0
         self._episode = 0
         self._matched = diag.MatchedDriverTracker(*pact1_matched_band)
@@ -156,11 +161,18 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         information: every operator measures the loading of its own lines.
         It reports t, while compensating t+1 needs the next value.  That gap is
         exactly where the unknown lives and it is preserved (I.8).
+
+        Congestion is a property of the BINDING line, so "max" is the
+        physically meaningful aggregate; "mean" over 23-35 lines dilutes any
+        peer effect toward zero, which is a candidate explanation for a flat
+        fit_gain.  Both are logged every row (rho_own_mean / rho_own_max) so
+        the choice can be made on measured variance rather than argument.
         """
         idx = self._line_in_zone[zone]
         if len(idx) == 0:
             return 0.0
-        return float(np.mean(g2op_obs.rho[idx]))
+        vals = g2op_obs.rho[idx]
+        return float(np.max(vals) if self.sensor_kind == "max" else np.mean(vals))
 
     # ------------------------------------------------------------------
     def _split_action(self, agent, act):
@@ -290,8 +302,14 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                 self._psi_hist.append(psi_next.copy())
                 if len(self._psi_hist) > 4000:
                     self._psi_hist.pop(0)
+            self._own_col_hist.append(own_col)
 
         self._psi_peer_prev = psi_peer_now
+        self._phi_hist.append(phi.copy())
+        if len(self._phi_hist) > 2000:
+            self._phi_hist.pop(0)
+        if len(self._own_col_hist) > 4000:
+            del self._own_col_hist[:-4000]
 
         ell_arr = np.asarray(ell_norms)
         self._ell_max_seen = max(self._ell_max_seen, float(ell_arr.max(initial=0.0)))
@@ -302,6 +320,9 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         if self.logger is None or self._step % self.log_every:
             return
         Aw = np.asarray(self._A_window) if self._A_window else np.array([0.0])
+        P = np.asarray(self._phi_hist) if self._phi_hist else np.zeros((0, 0))
+        own_rhos = [self._sensor(g2op_obs, self._zone_of[a])
+                    for a in self._zone_agents]
         trusts = np.asarray([self._applied_trust[a] for a in self._zone_agents])
         confs = np.asarray([self._last_conf[a] for a in self._zone_agents])
         gains = [self.est[a].fit_gain() for a in self._zone_agents]
@@ -329,12 +350,29 @@ class PACT1Env(PZMAEnvRecoDNLimit):
             "A_mean": float(Aw.mean()), "A_min": float(Aw.min()), "A_max": float(Aw.max()),
             "rho_mean": float(np.mean(g2op_obs.rho)),
             "rho_max": float(np.max(g2op_obs.rho)),
+            "phi_mean": float(np.mean(P)) if P.size else np.nan,
+            "phi_std": float(np.mean(P.std(axis=0))) if P.shape[0] > 1 else np.nan,
+            "phi_frac_active": float(np.mean(P > 1e-6)) if P.size else np.nan,
+            "own_col_std": (float(np.std(self._own_col_hist[-2000:]))
+                            if len(self._own_col_hist) > 1 else np.nan),
+            "rho_own_mean": float(np.mean(own_rhos)) if own_rhos else np.nan,
+            "rho_own_max": float(np.max(own_rhos)) if own_rhos else np.nan,
+            "g2op_per_gym": (float(np.mean(self._g2op_steps))
+                             if self._g2op_steps else np.nan),
             "n_eff_r": self.basis.r,
         })
         self._A_window = []
 
     # ------------------------------------------------------------------
     def step(self, gym_action):
+        # The heuristic base class plays do-nothing while max rho <= safe_max_rho
+        # and only surfaces to the agent when the grid is stressed, so ONE gym
+        # step can span many grid2op steps.  That matters: PACT-1 compensates
+        # with one-gym-step-delayed peer actions under a persistence assumption
+        # (III.8b), and persistence over 30 simulated minutes is a very
+        # different claim from persistence over 5.  If this ratio is large and
+        # variable, the lag -- not the basis -- is what is killing fit_gain.
+        t0 = getattr(self.env_g2op, "nb_time_step", 0)
         exec_action, _ = self._compensate(gym_action)
 
         for agent in self._zone_agents:
@@ -346,6 +384,11 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         obs, rew, done, trunc, info = super().step(exec_action)
 
         self._step += 1
+        t1 = getattr(self.env_g2op, "nb_time_step", 0)
+        if t1 >= t0:
+            self._g2op_steps.append(int(t1 - t0))
+            if len(self._g2op_steps) > 2000:
+                self._g2op_steps.pop(0)
         if self.pact1_enabled:
             g2op_obs = self._previous_act        # the post-step grid2op obs
             ell_arr, A = self._update_estimators(
