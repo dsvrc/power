@@ -78,6 +78,13 @@ def cli():
                         help="""Confidence gate. 'prediction' (default) = prediction gate
                                 x divisor gate x readiness. 'trace' is the known-bad gate,
                                 kept runnable as an ablation. (default: prediction)""")
+    parser.add_argument('--pact1_sensor', type=str, default="mean",
+                        choices=["mean", "max"],
+                        help="""Own-harm sensor: mean or max rho over the zone's own
+                                lines. Congestion is a property of the BINDING line, so
+                                'max' carries more signal; 'mean' over 23-35 lines can
+                                dilute the peer effect toward zero. Both are logged
+                                every row either way. (default: mean)""")
     parser.add_argument('--pact1_log', type=str, default="pact_debug.csv",
                         help="PACT-1 diagnostics CSV. Read applied_trust first.")
     parser.add_argument('--save_experiment', action='store_true', 
@@ -185,6 +192,7 @@ if __name__ == "__main__":
             "enabled": True,
             "trust": args.pact1_trust,
             "gate": args.pact1_gate,
+            "sensor": args.pact1_sensor,
             "log": os.path.join(ROOT_DIR, args.pact1_log),
         }
     

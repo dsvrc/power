@@ -136,6 +136,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
             f"zone agents      : {len(self._zone_agents)}",
             f"trust init       : {self.trust_init}   (III.5 inverted prior)",
             f"confidence gate  : {self.gate_kind}",
+            f"own-harm sensor  : {self.sensor_kind} rho over the zone's own lines",
             f"RLS mu / p0      : {pact1_mu} / {pact1_p0}",
             f"max |delta|      : {self.max_delta} action units",
             f"log              : {pact1_log or '(off)'}",
