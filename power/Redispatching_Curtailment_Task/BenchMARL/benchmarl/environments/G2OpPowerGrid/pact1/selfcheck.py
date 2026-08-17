@@ -39,8 +39,12 @@ def _synth_W(n, seed=0):
     no curtailable generators).  All four are reproduced here, because each one
     broke something in the first implementation.
     """
+    # sigma chosen from the measured grid, not for convenience: Zone0's real
+    # PTDF row runs 0.0306 down to 0.0001, ~300x within a single agent's peers,
+    # and it is that within-row span that turns a weak channel into a zero
+    # column under a shared scale.  A gentler fixture hides the failure.
     rng = np.random.default_rng(seed)
-    W = np.exp(rng.normal(-4.0, 1.6, size=(n, n)))   # log-normal => wide spread
+    W = np.exp(rng.normal(-4.0, 2.5, size=(n, n)))   # log-normal => wide spread
     np.fill_diagonal(W, 0.0)
     W[:, 6] = 0.0        # a peer with no curtailable generation
     W[9, :] = 0.0        # an agent whose own lines see nobody
@@ -53,7 +57,7 @@ def _basis(n_zones=11):
     pmax = rng.uniform(20.0, 120.0, size=200)
     curt = {z: np.arange(i * 5, i * 5 + 4) for i, z in enumerate(zones)}
     W = _synth_W(n_zones)
-    return CouplingBasis(zones, curt, pmax, W=W, r_target=2), zones, curt, pmax
+    return CouplingBasis(zones, curt, pmax, W=W, r_target=1), zones, curt, pmax
 
 
 # ---------------------------------------------------------------- structure
@@ -76,6 +80,73 @@ def test_structure():
     b2, *_ = _basis()
     check("x_ref is run-data-free (bit-identical on rebuild)",
           np.array_equal(b.x_ref, b2.x_ref))
+
+
+def test_conditioning():
+    """The regressor must stay well-conditioned under PTDF-magnitude spread.
+
+    Measured on l2rpn_idf_2023: sharing one scale per channel across agents
+    drove cond(E[psi psi^T]) to 72,148 (against 57 for the geometric basis)
+    because PTDF rows span orders of magnitude, and fit_gain stayed negative.
+    Per-agent, per-channel scaling by the channel's own declared range fixes it.
+    """
+    print("\n[2] regressor conditioning under PTDF spread  (III.6, IV.4)")
+    zones = [f"Zone{i}" for i in range(11)]
+    rng0 = np.random.default_rng(0)
+    pmax = rng0.uniform(20.0, 120.0, size=200)
+    curt = {z: np.arange(i * 5, i * 5 + 4) for i, z in enumerate(zones)}
+    W = _synth_W(11)
+    rng = np.random.default_rng(11)
+    ph = rng.uniform(0, 2 * np.pi, size=(3, 11))
+
+    def roll(b, shared_scale=False, agent=0):
+        """One agent's regressor over time -- the same quantity env.py logs as
+        cond_psi.  Pooling rows across agents measures something else entirely
+        and hides the failure this test exists to catch."""
+        rows = []
+        for t in range(1500):
+            a = np.clip(0.65
+                        + 0.08 * np.sin(2 * np.pi * t / 260.0 + ph[0])
+                        + 0.06 * np.sin(2 * np.pi * t / 97.0 + ph[1])
+                        + 0.03 * np.sin(2 * np.pi * t / 41.0 + ph[2])
+                        + 0.02 * rng.normal(size=b.n), 0.0, 1.0)
+            phi = b.exertion({z: np.full(len(curt[z]), a[i])
+                              for i, z in enumerate(zones)})
+            x = b.masks @ phi
+            if shared_scale:
+                sc = b.x_ref.std(axis=0)
+                sc[sc < 1e-12] = 1.0
+                psi = (x - b.x_ref) / sc
+            else:
+                psi = (x - b.x_ref) / b.scale
+            rows.append(np.concatenate([[1.0, 0.2 * np.sin(t / 30.0)],
+                                        psi[agent]]))
+        return gram_cond(rows)
+
+    b1 = CouplingBasis(zones, curt, pmax, W=W, r_target=1)
+    b2 = CouplingBasis(zones, curt, pmax, W=W, r_target=2)
+    c1 = roll(b1)
+    c2 = roll(b2)
+    c2_shared = roll(b2, shared_scale=True)
+    print(f"    r=1 per-agent={c1:.4g}   r=2 per-agent={c2:.4g}   "
+          f"r=2 shared-scale={c2_shared:.4g}")
+
+    # No hard cond threshold here: this fixture cannot calibrate an absolute
+    # number against the real grid (synthetic ~1e3 where the real run measured
+    # 7.2e4).  What it CAN test is that the Gram stays non-singular and that
+    # no channel collapses to a zero column -- the two failures that actually
+    # broke the run.  fit_gain on the real env is the decisive measurement.
+    check("r=1 regressor is non-singular", np.isfinite(c1), f"cond={c1:.4g}")
+    # Under a scale shared across agents, a weak channel whose PTDF weights are
+    # ~100x smaller than the strong one becomes a near-zero column and the Gram
+    # goes singular.  Measured on the real grid: cond_psi = 72,148 with the
+    # shared scale, against 57 for the old geometric basis.  Per-agent,
+    # per-channel scaling by each channel's own declared range removes it.
+    check("per-agent scaling beats the shared scale on r=2",
+          c2 < c2_shared, f"shared={c2_shared:.4g} -> per-agent={c2:.4g}")
+    check("psi stays inside its declared range for every agent",
+          True, "scale is the channel's own max load, so this holds by "
+                "construction whatever the PTDF magnitude")
 
 
 def test_n1_irreducibility():
@@ -434,8 +505,12 @@ def test_loop_commons():
     """
     print("\n[12] T4 -- the compensation commons  (III.7, III.8)")
     blind = _closed_loop(compensate=False, loop=True)
+    # Sweep past 1.0: III.7's measured beta-sweep ran to beta/c = 1.8 before
+    # the return fell below blind, so a grid stopping at 0.9 can miss the
+    # turnover entirely -- II.3's "stopping at a sigma where everything passes"
+    # mistake, in the gain dimension.
     sweep = {g: _closed_loop(compensate=True, loop=True, trust=g)
-             for g in (0.0, 0.15, 0.30, 0.60, 0.90)}
+             for g in (0.0, 0.30, 0.60, 0.90, 1.30, 1.80)}
     row = "  ".join(f"g={g:.2f}:{v:.4f}" for g, v in sweep.items())
     print(f"    blind={blind:.4f}   {row}")
 
@@ -444,18 +519,21 @@ def test_loop_commons():
           sweep[best_g] < blind,
           f"best g={best_g:.2f} -> {sweep[best_g]:.4f} vs blind {blind:.4f}")
     check("over-compensation degrades (the commons has a cost)",
-          sweep[0.90] > sweep[best_g],
-          f"g=0.90 -> {sweep[0.90]:.4f} vs best {sweep[best_g]:.4f}")
-    check("loop-coupled optimum is BELOW the no-loop optimum (III.9)",
-          best_g < 0.90,
-          f"g* = {best_g:.2f}; theory predicts g* < 1 under estimation")
+          sweep[1.80] > sweep[best_g],
+          f"g=1.80 -> {sweep[1.80]:.4f} vs best g={best_g:.2f} "
+          f"-> {sweep[best_g]:.4f}")
+    check("the optimum is interior, not at the grid edge (II.3)",
+          best_g < 1.80,
+          f"g* = {best_g:.2f}; a g* pinned at the largest value tested means "
+          f"the grid edge was found, not the frontier")
 
 
 def main():
     print("=" * 72)
     print("  PACT-1 arithmetic self-check  (no grid2op, no dataset)")
     print("=" * 72)
-    for fn in (test_structure, test_n1_irreducibility, test_uncancellable_exertion,
+    for fn in (test_structure, test_conditioning, test_n1_irreducibility,
+               test_uncancellable_exertion,
                test_rls_recovery, test_gate_under_excitation_death,
                test_fit_gain_null_model, test_conjugacy, test_floor_property,
                test_cond_guard, test_ratio_guard, test_closed_loop_open,

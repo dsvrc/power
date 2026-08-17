@@ -70,6 +70,29 @@ nothing** (its own lines are insensitive to every peer). Zone9 is reported in
 `dead_agents` and stays at `g=0` by the floor property rather than being
 silently zero-filled.
 
+### Scaling: per agent, per channel — and why
+
+The first PTDF version kept the old normalisation (`x_ref.std(axis=0)`: one
+scale per channel, shared across agents) and measured **`cond_psi` = 72,148**
+against 57 for the geometric basis, with `fit_gain` still negative. Cause:
+Zone0's PTDF row runs 0.0306 down to 0.0001, so under a shared scale the weak
+channel becomes a near-zero column and the Gram goes singular.
+
+Each agent-channel is now scaled by its own declared range,
+`sum_j W[i,j] * pmax_j`, putting `psi` in [-0.5, +0.5] for every agent whatever
+the PTDF magnitude. Still declared — operator plus action box, no run data —
+and each agent runs its own estimator, so per-agent scaling leaks nothing.
+
+**`r = 1` is the default.** Splitting peers into strong/weak channels measures
+*worse* conditioned than a single PTDF-weighted channel (3006 vs 810 on the
+calibrated fixture), because after each channel is normalised by its own range
+both columns collapse to a weighted mean of peer curtailment fractions and go
+near-collinear. IV.4: report the effective r, do not force channels to survive.
+
+**The self-check cannot calibrate an absolute `cond`** — synthetic ~8e2 where
+the real run measured 7.2e4. It tests non-singularity and the absence of zero
+columns; `fit_gain` on the real environment is the decisive measurement.
+
 ## Three deviations from the guide, each forced by a measurement
 
 **1. The gate is a product of three terms, not III.5's one.**

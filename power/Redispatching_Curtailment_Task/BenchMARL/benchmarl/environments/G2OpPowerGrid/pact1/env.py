@@ -58,7 +58,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                  pact1_gate="prediction",   # "prediction" | "trace" (ablation) | "none"
                  pact1_hp_tau=2000.0,       # standing-level EMA, in env steps
                  pact1_sensor="max",        # "mean" | "max" over the zone's own lines
-                 pact1_r=2,                 # peer channels, split by PTDF strength
+                 pact1_r=1,                 # peer channels, split by PTDF strength
                  pact1_log=None,
                  pact1_log_every=200,
                  pact1_matched_band=(0.69, 0.70),

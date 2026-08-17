@@ -162,14 +162,33 @@ class CouplingBasis:
                 masks[a, c, peers] = W[a, peers]      # PTDF-WEIGHTED, not binary
         x_ref_full = masks @ phi_ref                  # (n, n_ch)
 
-        # --- spread test -> which channels are identifiable ------------------
+        # --- PER-AGENT, PER-CHANNEL scaling ---------------------------------
+        # range[a, c] = sum_{j in c} W[a,j] * pmax_j is the largest x that
+        # agent a's channel c can take (every peer curtailing fully), so
+        # psi = (x - range/2) / range lands in [-0.5, +0.5] for EVERY agent and
+        # channel whatever the PTDF magnitudes are.  Still purely declared:
+        # the operator and the action box, no run data.
+        #
+        # A single scale shared across agents -- x_ref.std(axis=0), which is
+        # what this used to do -- is fine only while all agents have comparable
+        # coupling magnitude.  Under PTDF weights they do not: measured on
+        # l2rpn_idf_2023 the rows span orders of magnitude and the shared scale
+        # drove cond(E[psi psi^T]) to 72,148 against 57 for the geometric
+        # basis, with fit_gain still negative.  Each agent runs its own
+        # estimator, so per-agent scaling costs nothing and leaks nothing.
+        rng_full = 2.0 * x_ref_full                   # (n, n_ch)
+
+        # A channel is identifiable for an agent only if it has live peers.
+        # Report per-channel coverage; drop a channel only if it is dead for
+        # essentially everyone (IV.4: report the effective r, do not force
+        # channels to survive).
+        self.coverage = (rng_full > 1e-12).mean(axis=0)
         self.spread = np.zeros(n_ch)
         for c in range(n_ch):
-            col = x_ref_full[:, c]
-            m = np.abs(col).mean()
-            self.spread[c] = (col.std() / m) if m > 1e-12 else np.inf
-        self.keep = [c for c in range(n_ch)
-                     if np.isfinite(self.spread[c]) and self.spread[c] >= SPREAD_DEAD]
+            col = rng_full[:, c]
+            live = col[col > 1e-12]
+            self.spread[c] = (live.std() / live.mean()) if len(live) > 1 else np.inf
+        self.keep = [c for c in range(n_ch) if self.coverage[c] >= 2.0 / self.n]
         if not self.keep:
             raise RuntimeError(
                 "every coupling channel is degenerate; the basis cannot be "
@@ -180,8 +199,8 @@ class CouplingBasis:
                            for c in self.keep]
         self.masks = masks[:, self.keep, :]
         self.x_ref = x_ref_full[:, self.keep]
-        sc = self.x_ref.std(axis=0)
-        sc[sc < 1e-12] = 1.0
+        sc = rng_full[:, self.keep].copy()
+        sc[sc < 1e-12] = 1.0                          # dead agent-channel -> psi = 0
         self.scale = sc
 
         # Agents with no live coupling at all: their peer prediction is
@@ -222,6 +241,7 @@ class CouplingBasis:
             state = "kept" if c in self.keep else "DROPPED (degenerate)"
             nm = CHANNEL_NAMES[c] if c < len(CHANNEL_NAMES) else f"ch{c}"
             lines.append(f"    {nm:9s} pairs={n_pairs:4d} "
+                         f"coverage={self.coverage[c]:5.2f} "
                          f"spread={self.spread[c]:8.4f}  {state}")
         lines.append(f"    effective r = {self.r}  {self.kept_names}")
         if self.dead_agents:
