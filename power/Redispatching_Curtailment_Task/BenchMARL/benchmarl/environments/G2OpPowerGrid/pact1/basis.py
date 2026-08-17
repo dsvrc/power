@@ -1,12 +1,23 @@
-"""The declared basis: zone geometry -> r channels, and the reference load.
+"""The declared basis: the grid's own load-transfer operator -> r channels.
 
-Guide refs: I.7 (hand over a basis, not an operator), III.6 (centre on the
-basis's own zero point; cond=inf is a VALUE), IV.4 (report the effective r,
-do not force channels to survive).
+Guide refs: IV.1 (in a capacitated flow network the cross-agent coupling IS the
+network's own load-transfer operator -- PTDF for a power grid), I.7 (hand over
+a basis, not a fitted operator), III.6 (centre on the basis's own zero point;
+cond=inf is a VALUE), IV.4 (report the effective r, do not force channels).
 
-Nothing here reads run data.  The channel partition and x_ref are functions of
-zones_definitions.json and the action box alone, which is what keeps the model
-class *declared* rather than *fitted*.
+PTDF is not privileged information: it is the network model, which every system
+operator has, and it is a *declared* quantity computed once from the grid --
+never fitted from run data.  What stays unknown is theta, how load actually
+distributes across the channels, and that is what the RLS tracks.
+
+HISTORY, because it cost a run.  The first version of this file built the
+channels from zone GEOMETRY -- "peer owns a line I watch" (halo) vs everything
+else (distant) -- giving every pair inside a bucket the same weight.  Measured
+on l2rpn_idf_2023 that produced fit_gain = -0.0045, i.e. the peer channels made
+the one-step-ahead prediction WORSE than an intercept-only null model, because
+the true PTDF weights span orders of magnitude (spread std/mean 1.35 against
+0.55 / 0.14 for the two geometric buckets) and are strongly asymmetric, which a
+symmetric geometric relation cannot represent at all.
 """
 import json
 import os
@@ -15,16 +26,14 @@ import numpy as np
 
 ENV_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Channel ids.  CORE is kept in the enumeration even though the l2rpn_idf_2023
-# zones never populate it (they partition the lines, so no two zones own the
-# same one) -- a different zoning would, and the spread check drops it cleanly.
-CORE, HALO, DIST = 0, 1, 2
-CHANNEL_NAMES = ("core", "halo", "distant")
+CHANNEL_NAMES = ("strong", "weak", "residual")
 
 # A channel whose relative spread across agents falls below this is collinear
 # with the intercept and cannot be identified.  URB's dead arterial channel
 # measured 0.00796.
 SPREAD_DEAD = 0.05
+# Below this share of the agent's total coupling, a peer is numerically zero.
+W_FLOOR = 1e-9
 
 
 def _load_zones():
@@ -33,121 +42,191 @@ def _load_zones():
         return json.load(f)
 
 
-class CouplingBasis:
-    """Zero-diagonal channel partition over zone agents, plus x_ref.
+def get_ptdf(env):
+    """Injection -> flow sensitivities, or None if this backend cannot give them.
 
-    Parameters
-    ----------
-    zone_names : ordered zone names, one per local agent (agent_1..agent_n)
-    gen_curtail_inside : {zone_name: array of generator ids it may curtail}
-    gen_pmax : full grid gen_pmax vector, used to weight exertion in MW
+    lightsim2grid returns (n_line, n_bus) with n_bus = 2 * n_sub, because
+    grid2op doubles every substation into two busbars.  At the reference
+    topology everything sits on busbar 1, so substation id indexes the first
+    n_sub columns directly.
+    """
+    try:
+        return np.asarray(env.backend._grid.get_ptdf())
+    except Exception:                                        # noqa: BLE001
+        pass
+    for attr in ("get_ptdf", "get_PTDF", "ptdf"):
+        try:
+            cand = getattr(env.backend, attr)
+            return np.asarray(cand() if callable(cand) else cand)
+        except Exception:                                    # noqa: BLE001
+            continue
+    return None
+
+
+def ptdf_zone_coupling(env, zone_names, ptdf=None):
+    """W[i, j] = mean |PTDF| from j's curtailable generators onto i's OWN lines.
+
+    Zero-diagonal by construction (I.7 rule 1): j == i is never accumulated, so
+    the single-agent projection of the coupling is exactly 0 whatever the grid
+    does.
+    """
+    if ptdf is None:
+        ptdf = get_ptdf(env)
+    if ptdf is None:
+        return None
+
+    zones = _load_zones()
+    n = len(zone_names)
+    gen_bus = env.gen_to_subid
+    renewable = np.where(env.gen_renewable)[0]
+    n_cols = ptdf.shape[1]
+
+    W = np.zeros((n, n))
+    for a, zi in enumerate(zone_names):
+        lines_i = np.asarray(zones[zi]["line_in_zone_idx"], dtype=int)
+        lines_i = lines_i[lines_i < ptdf.shape[0]]
+        if not len(lines_i):
+            continue
+        for b, zj in enumerate(zone_names):
+            if a == b:
+                continue
+            gj = np.intersect1d(
+                np.asarray(zones[zj]["gen_inside_idx"], dtype=int), renewable)
+            if not len(gj):
+                continue
+            buses = gen_bus[gj]
+            buses = buses[buses < n_cols]
+            if not len(buses):
+                continue
+            W[a, b] = float(np.mean(np.abs(ptdf[np.ix_(lines_i, buses)])))
+    return W
+
+
+class CouplingBasis:
+    """PTDF-weighted, zero-diagonal channel decomposition over zone agents.
+
+    Channels are a per-agent split of that agent's peers by coupling strength.
+    Splitting rather than using one lumped channel lets theta express how the
+    load actually distributes between tightly and loosely coupled peers, which
+    is the unknown the guide asks the estimator to track; the PTDF weights
+    inside each channel carry the physics the geometric version threw away.
     """
 
-    def __init__(self, zone_names, gen_curtail_inside, gen_pmax):
+    def __init__(self, zone_names, gen_curtail_inside, gen_pmax,
+                 W=None, r_target=2):
         self.zone_names = list(zone_names)
         self.n = len(self.zone_names)
-        zones = _load_zones()
+        self.r_target = int(r_target)
 
-        line_in = {z: set(zones[z]["line_in_zone_idx"]) for z in self.zone_names}
-        line_nb = {z: set(zones[z]["line_neighboring_idx"]) for z in self.zone_names}
+        if W is None:
+            raise RuntimeError(
+                "no PTDF available; refusing to fall back to a geometric basis "
+                "-- it measured fit_gain = -0.0045 on this grid")
+        W = np.asarray(W, dtype=np.float64).copy()
+        np.fill_diagonal(W, 0.0)
+        self.W = W
+        assert np.allclose(np.diag(self.W), 0.0), "basis is not zero-diagonal"
 
-        # --- channel matrix -------------------------------------------------
-        chan = np.full((self.n, self.n), DIST, dtype=np.int8)
-        for a, i in enumerate(self.zone_names):
-            for b, j in enumerate(self.zone_names):
-                if a == b:
-                    chan[a, b] = -1           # zero diagonal (I.7 rule 1)
-                elif line_in[i] & line_in[j]:
-                    chan[a, b] = CORE         # j drives a line i owns
-                elif line_nb[i] & line_in[j]:
-                    chan[a, b] = HALO         # j drives a line i only watches
+        # --- per-agent channel assignment by coupling strength --------------
+        # chan[i, j] = channel id of peer j for agent i, -1 on the diagonal and
+        # for peers this agent is not coupled to at all.
+        chan = np.full((self.n, self.n), -1, dtype=np.int8)
+        for a in range(self.n):
+            row = W[a].copy()
+            row[a] = 0.0
+            live = np.where(row > W_FLOOR * max(row.max(), 1e-30))[0]
+            if not len(live):
+                continue                      # e.g. Zone9: no coupling at all
+            if len(live) < self.r_target:
+                chan[a, live] = 0
+                continue
+            order = live[np.argsort(-row[live])]
+            for c, part in enumerate(np.array_split(order, self.r_target)):
+                chan[a, part] = c
         self.chan = chan
 
-        # I.7 rule 1 is load-bearing: assert it, never argue it.
-        assert (np.diag(chan) == -1).all(), "basis is not zero-diagonal"
-
-        # --- exertion scale, and x_ref (III.6) -----------------------------
-        # phi_j = sum_g (1 - a_g) * pmax_g  = MW of renewable withheld by j.
-        # A magnitude, so it has no sign-cancellation escape (I.3, the Ant trap),
-        # and the team can only drive it down by not curtailing at all, which
-        # overloads the grid.
+        # --- exertion scale and x_ref (III.6) -------------------------------
+        # phi_j = sum_g (1 - a_g) * pmax_g = MW of renewable withheld by j.
+        # A magnitude, so it has no sign-cancellation escape (I.3).
         self.pmax_per_zone = np.array(
             [float(np.sum(gen_pmax[np.asarray(gen_curtail_inside[z], dtype=int)]))
              if len(gen_curtail_inside[z]) else 0.0
              for z in self.zone_names])
-        # a_g ~ U[0,1] => E[1 - a_g] = 0.5.  Geometry and action box only.
-        phi_ref = 0.5 * self.pmax_per_zone
+        phi_ref = 0.5 * self.pmax_per_zone     # a_g ~ U[0,1] => E[1-a_g] = 0.5
 
-        x_ref = np.zeros((self.n, 3))
+        n_ch = self.r_target
+        masks = np.zeros((self.n, n_ch, self.n))
         for a in range(self.n):
-            for c in (CORE, HALO, DIST):
-                x_ref[a, c] = phi_ref[np.where(chan[a] == c)[0]].sum()
-        self.x_ref_full = x_ref
+            for c in range(n_ch):
+                peers = np.where(chan[a] == c)[0]
+                masks[a, c, peers] = W[a, peers]      # PTDF-WEIGHTED, not binary
+        x_ref_full = masks @ phi_ref                  # (n, n_ch)
 
-        # --- spread test -> which channels are identifiable at all ----------
-        self.spread = np.zeros(3)
-        for c in (CORE, HALO, DIST):
-            col = x_ref[:, c]
+        # --- spread test -> which channels are identifiable ------------------
+        self.spread = np.zeros(n_ch)
+        for c in range(n_ch):
+            col = x_ref_full[:, c]
             m = np.abs(col).mean()
-            self.spread[c] = (col.std() / m) if m > 1e-9 else np.inf
-        # inf means the channel is identically zero -> dead, not "very spread".
-        self.keep = [c for c in (CORE, HALO, DIST)
+            self.spread[c] = (col.std() / m) if m > 1e-12 else np.inf
+        self.keep = [c for c in range(n_ch)
                      if np.isfinite(self.spread[c]) and self.spread[c] >= SPREAD_DEAD]
         if not self.keep:
             raise RuntimeError(
                 "every coupling channel is degenerate; the basis cannot be "
-                "identified on this zoning")
+                "identified on this grid")
 
         self.r = len(self.keep)
-        self.kept_names = [CHANNEL_NAMES[c] for c in self.keep]
-        self.x_ref = x_ref[:, self.keep]
-        # Scale per channel so no column dominates the Gram (III.6).
+        self.kept_names = [CHANNEL_NAMES[c] if c < len(CHANNEL_NAMES) else f"ch{c}"
+                           for c in self.keep]
+        self.masks = masks[:, self.keep, :]
+        self.x_ref = x_ref_full[:, self.keep]
         sc = self.x_ref.std(axis=0)
-        sc[sc < 1e-9] = 1.0
+        sc[sc < 1e-12] = 1.0
         self.scale = sc
 
-        # Masks used per step: peers of agent i on kept channel c.
-        self.masks = np.zeros((self.n, self.r, self.n), dtype=np.float64)
-        for a in range(self.n):
-            for ci, c in enumerate(self.keep):
-                self.masks[a, ci, np.where(chan[a] == c)[0]] = 1.0
+        # Agents with no live coupling at all: their peer prediction is
+        # identically 0, so the floor property keeps them at plain MAPPO.
+        self.dead_agents = [a for a in range(self.n) if (chan[a] < 0).all()]
 
     # -----------------------------------------------------------------------
     def exertion(self, curtail_actions):
-        """phi_j for every zone agent, in MW withheld.
-
-        curtail_actions : {zone_name: action vector in [0,1]} -- the curtailment
-        limit ratios agent j commanded.  Absent agents contribute 0.
-        """
+        """phi_j for every zone agent, in MW withheld."""
         phi = np.zeros(self.n)
         for a, z in enumerate(self.zone_names):
             act = curtail_actions.get(z)
             if act is None or len(act) == 0:
                 continue
-            # (1 - ratio) * pmax, summed.  pmax_per_zone already holds the sum,
-            # so weight by the mean withheld fraction.
-            phi[a] = float(np.mean(1.0 - np.clip(act, 0.0, 1.0))) * self.pmax_per_zone[a]
+            phi[a] = float(np.mean(1.0 - np.clip(act, 0.0, 1.0))) \
+                * self.pmax_per_zone[a]
         return phi
 
     def waveforms(self, phi):
-        """x[i, c] = channel-c load agent i sees, then centred on x_ref/scaled.
+        """Centred, scaled regressor columns psi (n, r).
 
-        Returns the *centred* regressor columns psi (n, r).  Centring on the
-        geometric reference rather than the sample mean is what keeps cond
-        finite -- III.6, measured 1.3e5 -> 7.1 on this grid.
+        Centring on the geometric/PTDF reference rather than the sample mean is
+        what keeps cond finite AND keeps the model class declared rather than
+        fitted (III.6).
         """
-        x = self.masks @ phi              # (n, r)
+        x = self.masks @ phi
         return (x - self.x_ref) / self.scale
 
     def report(self):
-        lines = ["[pact1] declared coupling basis"]
-        for c in (CORE, HALO, DIST):
+        off = self.W[~np.eye(self.n, dtype=bool)]
+        nz = off[off > 0]
+        lines = ["[pact1] declared coupling basis (PTDF-weighted)"]
+        lines.append(f"    W off-diagonal: nonzero={len(nz)}/{off.size}  "
+                     f"spread std/mean={nz.std()/nz.mean():.4f}"
+                     if len(nz) else "    W off-diagonal: ALL ZERO")
+        for c in range(self.r_target):
             n_pairs = int((self.chan == c).sum())
-            s = self.spread[c]
             state = "kept" if c in self.keep else "DROPPED (degenerate)"
-            lines.append(f"    {CHANNEL_NAMES[c]:8s} pairs={n_pairs:4d} "
-                         f"spread={s:8.4f}  {state}")
+            nm = CHANNEL_NAMES[c] if c < len(CHANNEL_NAMES) else f"ch{c}"
+            lines.append(f"    {nm:9s} pairs={n_pairs:4d} "
+                         f"spread={self.spread[c]:8.4f}  {state}")
         lines.append(f"    effective r = {self.r}  {self.kept_names}")
+        if self.dead_agents:
+            lines.append(f"    agents with NO coupling (stay blind): "
+                         f"{[self.zone_names[a] for a in self.dead_agents]}")
         return "\n".join(lines)
 
 

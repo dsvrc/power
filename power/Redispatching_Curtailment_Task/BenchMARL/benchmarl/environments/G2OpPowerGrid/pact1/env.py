@@ -38,7 +38,7 @@ import os
 import numpy as np
 
 from ..PZMAEnvWithHeuristics import PZMAEnvRecoDNLimit
-from .basis import CouplingBasis, gram_cond
+from .basis import CouplingBasis, gram_cond, ptdf_zone_coupling
 from .compensator import (StandingLevel, action_sensitivity, apply_inverse,
                           compensation_delta)
 from .rls import RLSEstimator
@@ -57,7 +57,8 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                  pact1_own_gain_floor=1e-3,
                  pact1_gate="prediction",   # "prediction" | "trace" (ablation) | "none"
                  pact1_hp_tau=2000.0,       # standing-level EMA, in env steps
-                 pact1_sensor="mean",       # "mean" | "max" over the zone's own lines
+                 pact1_sensor="max",        # "mean" | "max" over the zone's own lines
+                 pact1_r=2,                 # peer channels, split by PTDF strength
                  pact1_log=None,
                  pact1_log_every=200,
                  pact1_matched_band=(0.69, 0.70),
@@ -92,7 +93,17 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         self._n_curtail = {z: len(gen_curtail_inside[z]) for z in zone_names}
         self._line_in_zone = line_in_zone
 
-        self.basis = CouplingBasis(zone_names, gen_curtail_inside, env.gen_pmax)
+        # The coupling operator comes from the grid model, computed once, never
+        # fitted from run data (IV.1).  A geometric stand-in measured
+        # fit_gain = -0.0045 here, so failing to get a PTDF is fatal rather
+        # than silently degrading to the version that does not work.
+        W = ptdf_zone_coupling(env, zone_names)
+        if W is None:
+            raise RuntimeError(
+                "PACT-1 needs injection->flow sensitivities and this backend "
+                "exposes none. Run probe_ptdf.py to see which routes exist.")
+        self.basis = CouplingBasis(zone_names, gen_curtail_inside, env.gen_pmax,
+                                   W=W, r_target=pact1_r)
         self.n_zones = self.basis.n
 
         self.est = {a: RLSEstimator(self.basis.r, mu=pact1_mu, p0=pact1_p0)

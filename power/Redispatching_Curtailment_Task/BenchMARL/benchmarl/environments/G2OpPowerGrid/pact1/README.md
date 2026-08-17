@@ -29,27 +29,46 @@ arm difference cannot be an algorithm difference.
 | excitation survives (IV.4) | ✅ continuous setpoints keep moving | ❌ discrete fleets converge and the regressor freezes |
 | codebase supports it | ✅ | ❌ `core.py` raises on continuous actions |
 
-## The declared basis — measured, not assumed
+## The declared basis — PTDF, and why the first version failed
 
-Zone geometry only; no run data, no PTDF call. Three candidate channels:
+**Current:** `W[i,j] = mean |PTDF|` from peer *j*'s curtailable generators onto
+agent *i*'s own lines, computed once from the grid model via
+`lightsim2grid gridmodel.get_ptdf()`. Peers are then split per agent into
+`r=2` channels by coupling strength, with the PTDF magnitudes carried as
+weights inside each channel. This is IV.1's prescription — the coupling
+operator *is* the network's own load-transfer operator, a declared quantity
+every operator has, never fitted from run data. θ, how load distributes across
+the channels, stays unknown and is what the RLS tracks.
 
-- **core** — peer drives a line this agent owns
-- **halo** — peer drives a line this agent only watches
-- **distant** — everything else
-
-Measured on `l2rpn_idf_2023`, 11 zones:
+**The first version used zone geometry instead and it did not work.** Channels
+were "peer owns a line I watch" (halo) vs everything else (distant), every pair
+inside a bucket weighted equally. Measured over 19k steps on `l2rpn_idf_2023`:
 
 ```
-core     pairs=  0   spread=inf      DROPPED (zones partition the lines)
-halo     pairs= 33   spread=0.5211   kept
-distant  pairs= 77   spread=0.1376   kept
-effective r = 2
-cond(Gram)  raw 3.9e4  ->  centred+scaled 7.15
+fit_gain  mean = -0.0045, only 9.7% of rows > 0
 ```
 
-`core` is empty because no two zones own the same line. Reporting **effective
-r = 2** rather than forcing three channels is IV.4's rule; the centring result
-reproduces III.6's URB fix (1.3e5 → 24 there, 3.9e4 → 7.15 here).
+Negative fit_gain means the peer columns made the one-step-ahead prediction
+*worse* than an intercept-only null model. Diagnosis, from `probe_ptdf.py`:
+
+```
+PTDF W spread std/mean = 1.3499
+geometric halo spread  = 0.5463
+geometric distant      = 0.1447
+W is strongly ASYMMETRIC:  W[1,0]=0.075 vs W[0,1]=0.031
+                           W[6,10]=0.171 vs W[10,6]=0
+```
+
+True coupling spans orders of magnitude and is asymmetric; a symmetric
+two-bucket geometric relation cannot represent it, and flattening it to two
+weights destroyed the signal. `basis.py` now refuses to fall back to the
+geometric version rather than silently degrading to the one that fails.
+
+Two structural facts the real grid forces, both reproduced in the self-check:
+**Zone6 exerts nothing** (no curtailable generators) and **Zone9 receives
+nothing** (its own lines are insensitive to every peer). Zone9 is reported in
+`dead_agents` and stays at `g=0` by the floor property rather than being
+silently zero-filled.
 
 ## Three deviations from the guide, each forced by a measurement
 
@@ -87,12 +106,13 @@ is faster than the synthetic driver.
 
 32/32, including end-to-end on a synthetic linear grid:
 
-- **No loop coupling**: std 0.2734 → 0.2470, **9.6% of the fluctuation removed**,
-  against a ceiling of 9.2% implied by `corr(ell_hat, ell_true) = 0.42`. The
-  method extracts essentially everything its estimate permits; the binding
-  constraint is identifiability, not the control law.
-- **Loop coupled (T4)**: interior optimum at `g=0.15` beating blind
-  (0.2618 vs 0.2734), degrading to 0.4150 at `g=0.90`. III.7's β-sweep shape
+- **No loop coupling**: std 0.1336 → 0.1174, **12.1% of the fluctuation
+  removed**, against a ceiling of 14.0% implied by
+  `corr(ell_hat, ell_true) = 0.510` — i.e. 87% of what the estimate permits.
+  The binding constraint is identifiability, not the control law.
+  (With the old geometric-shaped weights: corr 0.42, 9.6% removed.)
+- **Loop coupled (T4)**: interior optimum at `g=0.30` beating blind
+  (0.1314 vs 0.1336), degrading to 0.1437 at `g=0.90`. III.7's β-sweep shape
   reproduced, including over-compensation ending up worse than doing nothing.
   `g* < 1` as III.9 predicts.
 

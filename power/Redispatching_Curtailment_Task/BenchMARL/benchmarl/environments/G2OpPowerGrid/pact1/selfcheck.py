@@ -30,30 +30,49 @@ def check(name, ok, detail=""):
     return ok
 
 
+def _synth_W(n, seed=0):
+    """A stand-in for the PTDF zone coupling with the properties the real one has.
+
+    Measured on l2rpn_idf_2023: strongly ASYMMETRIC, spread std/mean = 1.35,
+    weights spanning orders of magnitude, and at least one agent with no
+    coupling at all (Zone9) plus one peer that exerts nothing (Zone6, which has
+    no curtailable generators).  All four are reproduced here, because each one
+    broke something in the first implementation.
+    """
+    rng = np.random.default_rng(seed)
+    W = np.exp(rng.normal(-4.0, 1.6, size=(n, n)))   # log-normal => wide spread
+    np.fill_diagonal(W, 0.0)
+    W[:, 6] = 0.0        # a peer with no curtailable generation
+    W[9, :] = 0.0        # an agent whose own lines see nobody
+    return W
+
+
 def _basis(n_zones=11):
     zones = [f"Zone{i}" for i in range(n_zones)]
     rng = np.random.default_rng(0)
-    n_gen = 200
-    pmax = rng.uniform(20.0, 120.0, size=n_gen)
-    # Deterministic disjoint curtailable sets, mirroring the real zoning shape.
+    pmax = rng.uniform(20.0, 120.0, size=200)
     curt = {z: np.arange(i * 5, i * 5 + 4) for i, z in enumerate(zones)}
-    return CouplingBasis(zones, curt, pmax), zones, curt, pmax
+    W = _synth_W(n_zones)
+    return CouplingBasis(zones, curt, pmax, W=W, r_target=2), zones, curt, pmax
 
 
 # ---------------------------------------------------------------- structure
 def test_structure():
-    print("\n[1] basis structure  (I.7 rule 1, III.6)")
+    print("\n[1] basis structure  (I.7 rule 1, III.6, IV.1)")
     b, zones, _, _ = _basis()
-    check("zero diagonal in every channel", (np.diag(b.chan) == -1).all())
+    check("zero diagonal in W", np.allclose(np.diag(b.W), 0.0))
+    check("zero diagonal in the channel assignment",
+          (np.diag(b.chan) == -1).all())
+    check("channels are PTDF-WEIGHTED, not binary buckets",
+          len(np.unique(np.round(b.masks[b.masks > 0], 8))) > b.n,
+          "the geometric version gave every pair in a bucket one weight, "
+          "which measured fit_gain = -0.0045")
     check("effective r reported, dead channels dropped",
           b.r == len(b.keep) and b.r >= 1,
           f"r={b.r} kept={b.kept_names}")
-    for c in range(3):
-        if c not in b.keep:
-            check(f"channel '{CHANNEL_NAMES[c]}' correctly dropped",
-                  not np.isfinite(b.spread[c]) or b.spread[c] < 0.05,
-                  f"spread={b.spread[c]:.4g}")
-    # x_ref must be a pure function of geometry: rebuilt twice, bit-identical.
+    check("an agent with no coupling is identified, not silently zero-filled",
+          9 in b.dead_agents, f"dead_agents={b.dead_agents}")
+    # x_ref must be a pure function of the declared operator: bit-identical.
     b2, *_ = _basis()
     check("x_ref is run-data-free (bit-identical on rebuild)",
           np.array_equal(b.x_ref, b2.x_ref))
@@ -64,7 +83,8 @@ def test_n1_irreducibility():
     zones = ["Zone0"]
     pmax = np.full(200, 50.0)
     try:
-        b = CouplingBasis(zones, {"Zone0": np.arange(4)}, pmax)
+        b = CouplingBasis(zones, {"Zone0": np.arange(4)}, pmax,
+                          W=np.zeros((1, 1)), r_target=2)
     except RuntimeError as e:
         # Every channel degenerate at N=1 is the CORRECT outcome: with no peers
         # there is no coupling to identify at all.

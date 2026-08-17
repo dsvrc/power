@@ -78,7 +78,7 @@ def cli():
                         help="""Confidence gate. 'prediction' (default) = prediction gate
                                 x divisor gate x readiness. 'trace' is the known-bad gate,
                                 kept runnable as an ablation. (default: prediction)""")
-    parser.add_argument('--pact1_sensor', type=str, default="mean",
+    parser.add_argument('--pact1_sensor', type=str, default="max",
                         choices=["mean", "max"],
                         help="""Own-harm sensor: mean or max rho over the zone's own
                                 lines. Congestion is a property of the BINDING line, so
