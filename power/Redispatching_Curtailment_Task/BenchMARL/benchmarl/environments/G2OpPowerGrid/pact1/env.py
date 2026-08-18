@@ -59,6 +59,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                  pact1_hp_tau=2000.0,       # standing-level EMA, in env steps
                  pact1_sensor="max",        # "mean" | "max" over the zone's own lines
                  pact1_r=1,                 # peer channels, split by PTDF strength
+                 pact1_fit_floor=0.005,     # min measured fit_gain before acting
                  pact1_log=None,
                  pact1_log_every=200,
                  pact1_matched_band=(0.69, 0.70),
@@ -71,6 +72,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         self.own_gain_floor = float(pact1_own_gain_floor)
         self.gate_kind = str(pact1_gate)
         self.sensor_kind = str(pact1_sensor)
+        self.fit_floor = float(pact1_fit_floor)
         self.log_every = int(pact1_log_every)
 
         # Zone agents only.  The global redispatching_agent acts on every gen
@@ -122,6 +124,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         self._ell_hat = {a: 0.0 for a in self._zone_agents}
         self._applied_trust = {a: 0.0 for a in self._zone_agents}
         self._last_conf = {a: 0.0 for a in self._zone_agents}
+        self._gate_parts = {a: (0.0, 0.0, 0.0) for a in self._zone_agents}
         self._sat_hits = 0
         self._sat_total = 0
         self._ell_max_seen = 0.0
@@ -228,9 +231,12 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                 if self.gate_kind == "prediction":
                     # Numerator gate (III.5) x divisor gate: the inverse is a
                     # ratio, and each half needs its own confidence.
-                    conf = (est.confidence_at(psi)
-                            * est.divisor_confidence(1)
-                            * est.ready_confidence())
+                    c_pred = est.confidence_at(psi)
+                    c_div = est.divisor_confidence(1)
+                    c_ready = est.ready_confidence() * est.fit_confidence(
+                        floor=self.fit_floor)
+                    self._gate_parts[agent] = (c_pred, c_div, c_ready)
+                    conf = c_pred * c_div * c_ready
                 elif self.gate_kind == "prediction_only":
                     conf = est.confidence_at(psi)      # ablation: no divisor gate
                 elif self.gate_kind == "trace":
@@ -346,6 +352,18 @@ class PACT1Env(PZMAEnvRecoDNLimit):
             "conf": float(confs.mean()),
             "conf_trace": float(np.mean([self.est[a].trace_confidence()
                                          for a in self._zone_agents])),
+            "conf_pred": float(np.mean([self._gate_parts[a][0]
+                                        for a in self._zone_agents])),
+            "conf_div": float(np.mean([self._gate_parts[a][1]
+                                       for a in self._zone_agents])),
+            "conf_ready": float(np.mean([self._gate_parts[a][2]
+                                         for a in self._zone_agents])),
+            "own_gain": float(np.mean([self.est[a].beta[1]
+                                       for a in self._zone_agents])),
+            "own_gain_se": float(np.mean([np.sqrt(max(self.est[a].P[1, 1], 0.0))
+                                          for a in self._zone_agents])),
+            "fit_gain_now": float(np.nanmean(
+                [self.est[a].fit_gain_now() for a in self._zone_agents])),
             "state": diag.classify(self._ell_max_seen,
                                    float(Aw.max() - Aw.min()),
                                    float(ell_arr.max(initial=0.0))),

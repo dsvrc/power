@@ -267,6 +267,43 @@ def test_fit_gain_null_model():
 
 
 # ------------------------------------------------------------- compensation
+def test_fit_gate():
+    """Compensation must be OFF while the peer channels explain nothing.
+
+    Measured on the 1M-frame run: Q1 had applied_trust = 0.095 with
+    fit_gain = 0.0006, and PACT-1 lost 6-14 return per iteration over that
+    stretch.  The covariance gates could not see it -- nothing is wrong with
+    the covariance when the peer term is simply uninformative.
+    """
+    print("\n[6b] fit_gain gate  (III.11's rule applied to the control path)")
+    rng = np.random.default_rng(21)
+    r = 2
+
+    # Case A: peer columns carry NO information -> gate must be hard 0.
+    est = RLSEstimator(r, mu=0.9995, p0=100.0, ready_updates=100)
+    for _ in range(4000):
+        psi = np.concatenate([[1.0], rng.normal(0, 1, size=1 + r)])
+        est.update(psi, 5.0 + 0.8 * psi[1] + 0.02 * rng.normal())
+    fg_a, gate_a = est.fit_gain_now(), est.fit_confidence()
+    check("uninformative peer channels => gate is exactly 0",
+          gate_a == 0.0, f"fit_gain_now={fg_a:+.5f} gate={gate_a:.4f}")
+
+    # Case B: peer columns genuinely drive the target -> gate opens.
+    est2 = RLSEstimator(r, mu=0.9995, p0=100.0, ready_updates=100)
+    for _ in range(4000):
+        psi = np.concatenate([[1.0], rng.normal(0, 1, size=1 + r)])
+        est2.update(psi, 5.0 + 0.8 * psi[1] + 0.9 * psi[2] - 0.6 * psi[3]
+                    + 0.02 * rng.normal())
+    fg_b, gate_b = est2.fit_gain_now(), est2.fit_confidence()
+    check("informative peer channels => gate opens",
+          gate_b > 0.5, f"fit_gain_now={fg_b:+.5f} gate={gate_b:.4f}")
+
+    # The floor property, restored in the regime that actually needed it.
+    d, g = compensation_delta(0.5, -0.8, trust=0.9, conf=gate_a * 0.5)
+    check("gate 0 => executed action IS the blind action (floor property)",
+          g == 0.0 and d == 0.0, "PACT-1 reduces exactly to MAPPO here")
+
+
 def test_conjugacy():
     print("\n[7] T3 conjugacy -- the inverse cancels  (I.4, III.7)")
     # Linear channel: realized rho = ... + drho_da * a + ell.
@@ -535,7 +572,8 @@ def main():
     for fn in (test_structure, test_conditioning, test_n1_irreducibility,
                test_uncancellable_exertion,
                test_rls_recovery, test_gate_under_excitation_death,
-               test_fit_gain_null_model, test_conjugacy, test_floor_property,
+               test_fit_gain_null_model, test_fit_gate,
+               test_conjugacy, test_floor_property,
                test_cond_guard, test_ratio_guard, test_closed_loop_open,
                test_loop_commons):
         fn()

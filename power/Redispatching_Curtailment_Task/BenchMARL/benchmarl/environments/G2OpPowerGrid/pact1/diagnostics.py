@@ -15,6 +15,13 @@ import numpy as np
 COLUMNS = [
     "step", "episode",
     "applied_trust", "trust_pol", "conf", "conf_trace",
+    # The gate is a product of three terms.  Logging only the product tells you
+    # trust is low but not WHICH half of the ratio is unsure, and they have
+    # different fixes: conf_pred low = the peer prediction is noisy, conf_div
+    # low = the coefficient the inverse divides by is not pinned down,
+    # conf_ready low = simply not enough samples yet.
+    "conf_pred", "conf_div", "conf_ready", "own_gain", "own_gain_se",
+    "fit_gain_now",               # windowed lift; the compensator gates on this
     "state",                      # INERT / ASLEEP / ALIVE
     "ell_mean", "ell_max",
     "ell_matched",                # E||ell|| at MATCHED driver level -- I.3

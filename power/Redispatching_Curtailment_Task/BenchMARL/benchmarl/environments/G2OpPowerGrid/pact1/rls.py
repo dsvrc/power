@@ -53,6 +53,14 @@ class RLSEstimator:
         self._sy = 0.0
         self._syy = 0.0
         self._n = 0
+        # Windowed copies of the same statistics, so the gate reads CURRENT
+        # predictive lift rather than a cumulative average that early negative
+        # values hold down forever.
+        self._fg_tau = 4000.0
+        self._e_full = None
+        self._e_null = None
+        self._e_y = None
+        self._e_yy = None
 
     # ------------------------------------------------------------------
     def predict(self, psi):
@@ -88,11 +96,22 @@ class RLSEstimator:
         self.n_updates += 1
 
         if self.n_updates > self.fit_warmup:
-            self._sse_full += (float(y) - pred_full) ** 2
-            self._sse_null += (float(y) - pred_null) ** 2
+            ef = (float(y) - pred_full) ** 2
+            en = (float(y) - pred_null) ** 2
+            self._sse_full += ef
+            self._sse_null += en
             self._sy += float(y)
             self._syy += float(y) ** 2
             self._n += 1
+            a = 1.0 / self._fg_tau
+            if self._e_full is None:
+                self._e_full, self._e_null = ef, en
+                self._e_y, self._e_yy = float(y), float(y) ** 2
+            else:
+                self._e_full += a * (ef - self._e_full)
+                self._e_null += a * (en - self._e_null)
+                self._e_y += a * (float(y) - self._e_y)
+                self._e_yy += a * (float(y) ** 2 - self._e_yy)
         return err
 
     # ------------------------------------------------------------------
@@ -126,6 +145,41 @@ class RLSEstimator:
         psi = np.asarray(psi, dtype=np.float64)
         self._last_psi = psi
         return self._confidence_for(psi)
+
+    def fit_gain_now(self):
+        """Windowed fit_gain: the peer channels' CURRENT lift over the null."""
+        if self._e_full is None or self.n_updates < self.fit_warmup + 200:
+            return np.nan
+        var = self._e_yy - self._e_y ** 2
+        if var <= 1e-12:
+            return np.nan
+        return float((self._e_null - self._e_full) / var)
+
+    def fit_confidence(self, floor=0.005):
+        """Gate the compensator on MEASURED predictive lift, not on a proxy.
+
+        III.5 gates on estimator covariance, which is the best available signal
+        when nothing better exists.  Here something better does exist and is
+        already logged: fit_gain, the peer channels' R^2 lift over the
+        intercept+own-action null model.  Covariance can look fine while the
+        peer term carries no information at all -- measured on the 1M-frame
+        run, Q1 had applied_trust = 0.095 with fit_gain = 0.0006, i.e. the
+        compensator was on at 10% strength while its estimate was worthless,
+        and PACT-1 lost ~6-14 return per iteration over that stretch.
+
+        Below `floor` the correction is noise and the gain is exactly 0, which
+        restores the floor property (III.4) in the regime that actually needed
+        it: with g = 0 the executed action IS the blind action.  Above it, ramp
+        in over the next decade of lift.
+
+        `floor` is a declared constant, not a tuned one: it is III.11's own
+        rule -- gate on the gain over the null model, never the raw fit --
+        applied to the control path instead of only to the log.
+        """
+        fg = self.fit_gain_now()
+        if not np.isfinite(fg) or fg <= floor:
+            return 0.0
+        return float(min(1.0, np.log10(fg / floor) / 1.0))
 
     def ready_confidence(self):
         """Ramps 0 -> 1 over the first `ready_updates` samples.
