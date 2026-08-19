@@ -22,7 +22,7 @@ class RLSEstimator:
     """
 
     def __init__(self, r, mu=0.9995, p0=100.0, n_null=2, fit_warmup=200,
-                 ready_updates=2000):
+                 ready_updates=2000, p_max_mult=10.0):
         self.r = r
         self.n_null = n_null              # intercept + own-gain columns
         self.dim = n_null + r
@@ -40,6 +40,23 @@ class RLSEstimator:
         self.mu = mu
         self.p0 = p0
         self.ready_updates = int(ready_updates)
+        # COVARIANCE WINDUP BOUND.  III.5 notes that RLS with forgetting
+        # inflates unexcited directions by 1/mu every update "without bound",
+        # and uses it to reject the trace gate -- but the estimator itself has
+        # the same problem and it is the one that bites.  Measured on the
+        # 1M-frame run, the standard error of the own-gain coefficient (the
+        # quantity the channel inverse DIVIDES by) ran
+        #     Q1 29  ->  Q2 4.9e3  ->  Q3 8.4e5  ->  Q4 1.4e8
+        # while cond_psi rose 130 -> 1279 as the policy converged and stopped
+        # exciting the regressor.  (1/0.9995)^83000 ~ 1e18, so this is windup,
+        # not noise.  Return tracked it exactly: PACT-1 led MAPPO through Q1-Q3
+        # (+1.3, +1.7, +10.6) and lost 28.8 in Q4.
+        #
+        # Covariance limiting: cap tr(P) at p_max_mult x its initial value.
+        # Large enough to keep tracking a drifting beta*, small enough that the
+        # estimator cannot run away when excitation dies.
+        self.p_max = float(p_max_mult) * float(p0) * self.dim
+        self.n_clamped = 0
         self.beta = np.zeros(self.dim)
         self.P = p0 * np.eye(self.dim)
         self.n_updates = 0
@@ -93,6 +110,17 @@ class RLSEstimator:
         self.P = (self.P - np.outer(k, Pp)) / self.mu
         # Keep P symmetric; asymmetry accumulates and the gate reads P.
         self.P = 0.5 * (self.P + self.P.T)
+        # Bound windup.  Rescaling preserves the relative uncertainty structure
+        # -- which direction is better known than which -- while stopping the
+        # absolute scale from running away in directions the data stopped
+        # exciting.  Without this the divisor's standard error reached 1.4e8.
+        tr = float(np.trace(self.P))
+        if np.isfinite(tr) and tr > self.p_max:
+            self.P *= self.p_max / tr
+            self.n_clamped += 1
+        elif not np.isfinite(tr):
+            self.P = self.p0 * np.eye(self.dim)   # diverged: restart the prior
+            self.n_clamped += 1
         self.n_updates += 1
 
         if self.n_updates > self.fit_warmup:

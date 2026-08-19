@@ -6,6 +6,7 @@ trust first), I.3 (the escape test at MATCHED driver level).
 """
 import os
 import threading
+import time
 
 import numpy as np
 
@@ -22,6 +23,7 @@ COLUMNS = [
     # conf_ready low = simply not enough samples yet.
     "conf_pred", "conf_div", "conf_ready", "own_gain", "own_gain_se",
     "fit_gain_now",               # windowed lift; the compensator gates on this
+    "trP", "clamp_frac",          # covariance windup: tr(P) and how often bounded
     "state",                      # INERT / ASLEEP / ALIVE
     "ell_mean", "ell_max",
     "ell_matched",                # E||ell|| at MATCHED driver level -- I.3
@@ -55,6 +57,28 @@ class PactLogger:
         d = os.path.dirname(path)
         if d:
             os.makedirs(d, exist_ok=True)
+
+        # Appending a run whose column set differs from the existing header
+        # silently misaligns every field in the new segment -- it produced a
+        # cond_psi of 0.02 (impossible; cond >= 1) and cost a full analysis
+        # pass before anyone noticed.  If the header on disk does not match,
+        # roll the old file aside rather than corrupting both runs.
+        if os.path.exists(path):
+            existing = None
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if not line.startswith("#"):
+                            existing = line.strip().split(",")
+                            break
+            except OSError:
+                existing = None
+            if existing != list(COLUMNS):
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                os.replace(path, f"{path}.{stamp}.bak")
+                print(f"[pact1] log schema changed; previous log moved to "
+                      f"{os.path.basename(path)}.{stamp}.bak")
+
         if not os.path.exists(path):
             with self._lock, open(path, "w", encoding="utf-8") as f:
                 if extra_note:

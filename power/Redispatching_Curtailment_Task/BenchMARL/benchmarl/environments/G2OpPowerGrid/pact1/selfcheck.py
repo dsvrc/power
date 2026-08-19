@@ -267,6 +267,44 @@ def test_fit_gain_null_model():
 
 
 # ------------------------------------------------------------- compensation
+def test_covariance_windup():
+    """P must not run away when excitation dies.
+
+    Measured on the 1M-frame run: own_gain_se went 29 -> 4.9e3 -> 8.4e5 ->
+    1.4e8 across quarters as cond_psi rose 130 -> 1279, and return tracked it
+    exactly (PACT-1 led MAPPO +1.3/+1.7/+10.6 in Q1-Q3, lost 28.8 in Q4).
+    (1/0.9995)^83000 ~ 1e18, so it is windup, not noise.
+    """
+    print("\n[5b] covariance windup under excitation death  (III.5)")
+    rng = np.random.default_rng(31)
+    r = 2
+    beta = np.array([0.3, -0.8, 0.45, -0.25])
+
+    def run(p_max_mult, n=60000):
+        est = RLSEstimator(r, mu=0.9995, p0=100.0, p_max_mult=p_max_mult)
+        for _ in range(1500):                     # healthy excitation
+            psi = np.concatenate([[1.0], rng.normal(0, 1, size=1 + r)])
+            est.update(psi, beta @ psi + 0.01 * rng.normal())
+        frozen = np.array([1.0, 0.5, 0.2, -0.1])  # policy converges, psi freezes
+        for _ in range(n):
+            est.update(frozen, beta @ frozen + 0.01 * rng.normal())
+        se = np.sqrt(max(est.P[1, 1], 0.0))
+        return float(np.trace(est.P)), se, est.beta[1]
+
+    tr_un, se_un, b_un = run(p_max_mult=1e18)     # effectively unbounded
+    tr_bd, se_bd, b_bd = run(p_max_mult=10.0)     # the shipped default
+    print(f"    unbounded: tr(P)={tr_un:.4g}  se(own_gain)={se_un:.4g}")
+    print(f"    bounded:   tr(P)={tr_bd:.4g}  se(own_gain)={se_bd:.4g}")
+
+    check("unbounded RLS does wind up (the bug reproduces)",
+          se_un > 1e3, f"se={se_un:.4g}")
+    check("covariance bound stops the runaway",
+          np.isfinite(tr_bd) and se_bd < 1e3 and se_bd < se_un / 100.0,
+          f"se {se_un:.4g} -> {se_bd:.4g}")
+    check("bounding does not destroy the estimate",
+          abs(b_bd - beta[1]) < 0.2, f"own_gain={b_bd:+.4f} vs true {beta[1]:+.2f}")
+
+
 def test_fit_gate():
     """Compensation must be OFF while the peer channels explain nothing.
 
@@ -572,6 +610,7 @@ def main():
     for fn in (test_structure, test_conditioning, test_n1_irreducibility,
                test_uncancellable_exertion,
                test_rls_recovery, test_gate_under_excitation_death,
+               test_covariance_windup,
                test_fit_gain_null_model, test_fit_gate,
                test_conjugacy, test_floor_property,
                test_cond_guard, test_ratio_guard, test_closed_loop_open,

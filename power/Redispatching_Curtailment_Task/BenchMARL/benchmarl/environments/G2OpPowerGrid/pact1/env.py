@@ -364,6 +364,11 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                                           for a in self._zone_agents])),
             "fit_gain_now": float(np.nanmean(
                 [self.est[a].fit_gain_now() for a in self._zone_agents])),
+            "trP": float(np.mean([np.trace(self.est[a].P)
+                                  for a in self._zone_agents])),
+            "clamp_frac": float(np.mean(
+                [self.est[a].n_clamped / max(self.est[a].n_updates, 1)
+                 for a in self._zone_agents])),
             "state": diag.classify(self._ell_max_seen,
                                    float(Aw.max() - Aw.min()),
                                    float(ell_arr.max(initial=0.0))),
