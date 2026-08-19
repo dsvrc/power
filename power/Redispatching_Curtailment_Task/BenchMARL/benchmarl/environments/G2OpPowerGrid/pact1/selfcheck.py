@@ -375,6 +375,44 @@ def test_conjugacy():
           s < 0, f"own_gain=+0.7 -> drho_da={s:.4g}")
 
 
+def test_significance_floor():
+    """A statistically meaningless divisor must not be inverted.
+
+    Measured on the 1M-frame run: own_gain = -0.024 with se = 5.3 (|t| = 0.005)
+    cleared the 1e-3 magnitude floor, delta pinned at the +-0.25 rail, and the
+    compensator degenerated into a constant bias -- which is why two runs whose
+    estimators differed by 7 orders of magnitude gave byte-identical returns.
+    """
+    print("\n[8b] significance floor on the divisor  (III.4)")
+    ell, se = 0.008, 5.3
+
+    # The old behaviour: magnitude floor only.
+    d_old, g_old = compensation_delta(ell, 0.0012, trust=0.9, conf=0.05,
+                                      max_delta=0.25)
+    check("magnitude floor alone lets an insignificant divisor through",
+          abs(d_old) >= 0.25 - 1e-12,
+          f"delta={d_old:+.4f} -> PINNED AT THE RAIL (a constant bias)")
+
+    # Rail-pinned means insensitive to the estimate: that is the smoking gun.
+    d_a, _ = compensation_delta(ell, 0.0012, trust=0.9, conf=0.05, max_delta=0.25)
+    d_b, _ = compensation_delta(ell, 0.0012, trust=0.9, conf=0.30, max_delta=0.25)
+    check("rail-pinned delta ignores a 6x change in confidence",
+          d_a == d_b, f"conf 0.05 and 0.30 both give delta={d_a:+.4f}")
+
+    # With the significance floor the same call does nothing at all.
+    d_new, g_new = compensation_delta(ell, 0.0012, trust=0.9, conf=0.05,
+                                      max_delta=0.25, drho_da_se=se, min_t=3.0)
+    check("significance floor refuses to invert it",
+          d_new == 0.0 and g_new == 0.0,
+          f"|t|={0.0012/se:.2g} << 3 -> exactly the blind action")
+
+    # A well-determined divisor still passes.
+    d_ok, g_ok = compensation_delta(ell, -0.8, trust=0.9, conf=0.9,
+                                    max_delta=0.25, drho_da_se=0.05, min_t=3.0)
+    check("a well-determined divisor is still inverted",
+          d_ok > 0 and abs(d_ok) < 0.25, f"|t|=16 -> delta={d_ok:+.5f}")
+
+
 def test_floor_property():
     print("\n[8] floor property -- cannot do worse than blind  (III.4)")
     a = np.full(4, 0.5)
@@ -612,7 +650,7 @@ def main():
                test_rls_recovery, test_gate_under_excitation_death,
                test_covariance_windup,
                test_fit_gain_null_model, test_fit_gate,
-               test_conjugacy, test_floor_property,
+               test_conjugacy, test_significance_floor, test_floor_property,
                test_cond_guard, test_ratio_guard, test_closed_loop_open,
                test_loop_commons):
         fn()

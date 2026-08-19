@@ -72,7 +72,8 @@ def action_sensitivity(own_gain, pmax):
 
 
 def compensation_delta(ell_hat, drho_da, trust, conf,
-                       max_delta=0.25, sensitivity_floor=1e-3):
+                       max_delta=0.25, sensitivity_floor=1e-3,
+                       drho_da_se=None, min_t=3.0):
     """Return (delta, applied_gain).
 
     delta is the additive shift to the curtailment-limit vector that cancels
@@ -104,6 +105,28 @@ def compensation_delta(ell_hat, drho_da, trust, conf,
         return 0.0, 0.0
     if abs(drho_da) < sensitivity_floor:
         return 0.0, 0.0
+
+    # SIGNIFICANCE FLOOR, not just a magnitude floor.
+    #
+    # A magnitude floor lets a statistically meaningless divisor through.
+    # Measured on the 1M-frame run: own_gain = -0.024 with se = 5.3, i.e.
+    # |t| = 0.005 -- indistinguishable from zero -- yet |drho_da| cleared the
+    # 1e-3 magnitude floor easily.  Dividing by it gives
+    #     delta = -g * ell / drho_da  ~  -0.05 * 0.008 / 0.001  =  -0.4
+    # which clips to the +-max_delta rail.  A rail-pinned delta is a CONSTANT
+    # BIAS on the curtailment setpoint, not a compensation: it stops responding
+    # to the estimate entirely.  That is why two runs whose estimators differed
+    # by seven orders of magnitude produced byte-identical returns, and why
+    # PACT-1 tracked below MAPPO -- it was applying a fixed offset, not
+    # cancelling anything.
+    #
+    # Requiring |coef| > min_t * se restores the floor property (III.4) in the
+    # regime that needs it: when the inverse does not exist to useful accuracy,
+    # do nothing at all and be exactly the blind policy.
+    if drho_da_se is not None and np.isfinite(drho_da_se):
+        if abs(drho_da) < float(min_t) * float(drho_da_se):
+            return 0.0, 0.0
+
     g = float(trust) * float(conf)
     delta = -g * float(ell_hat) / float(drho_da)
     if not np.isfinite(delta):

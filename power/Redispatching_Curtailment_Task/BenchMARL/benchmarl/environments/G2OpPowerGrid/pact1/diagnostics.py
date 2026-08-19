@@ -23,6 +23,10 @@ COLUMNS = [
     # conf_ready low = simply not enough samples yet.
     "conf_pred", "conf_div", "conf_ready", "own_gain", "own_gain_se",
     "fit_gain_now",               # windowed lift; the compensator gates on this
+    # Is the compensator moving actions at all, and is it RESPONDING to the
+    # estimate or pinned at the rail?  A rail-pinned delta is a constant bias,
+    # not a compensation, and it is invisible in every other column.
+    "delta_abs", "delta_clip_frac", "delta_nonzero_frac",
     "trP", "clamp_frac",          # covariance windup: tr(P) and how often bounded
     "state",                      # INERT / ASLEEP / ALIVE
     "ell_mean", "ell_max",

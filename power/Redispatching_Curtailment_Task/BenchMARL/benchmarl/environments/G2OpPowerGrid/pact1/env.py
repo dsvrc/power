@@ -60,6 +60,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                  pact1_sensor="max",        # "mean" | "max" over the zone's own lines
                  pact1_r=1,                 # peer channels, split by PTDF strength
                  pact1_fit_floor=0.005,     # min measured fit_gain before acting
+                 pact1_min_t=3.0,           # min |coef|/se on the divisor
                  pact1_log=None,
                  pact1_log_every=200,
                  pact1_matched_band=(0.69, 0.70),
@@ -73,6 +74,10 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         self.gate_kind = str(pact1_gate)
         self.sensor_kind = str(pact1_sensor)
         self.fit_floor = float(pact1_fit_floor)
+        self.min_t = float(pact1_min_t)
+        self._delta_hist = []
+        self._delta_clipped = 0
+        self._delta_n = 0
         self.log_every = int(pact1_log_every)
 
         # Zone agents only.  The global redispatching_agent acts on every gen
@@ -252,12 +257,23 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                 ell = self.standing[agent].update(est.peer_component(psi))
                 self._ell_hat[agent] = ell
 
+                # Propagate the divisor's uncertainty, not just its value:
+                # d(rho)/d(a) is own_gain rescaled, so its standard error
+                # rescales identically.
+                pmax_i = self.basis.pmax_per_zone[a_i]
+                se_scale = abs(pmax_i / max(pmax_i, 1.0))
                 delta, g = compensation_delta(
                     ell, self._sensitivity(a_i, est.beta[1]),
                     self.trust_init, conf,
                     max_delta=self.max_delta,
-                    sensitivity_floor=self.own_gain_floor)
+                    sensitivity_floor=self.own_gain_floor,
+                    drho_da_se=np.sqrt(max(est.P[1, 1], 0.0)) * se_scale,
+                    min_t=self.min_t)
             self._applied_trust[agent] = g
+            self._delta_hist.append(abs(delta))
+            self._delta_clipped += int(abs(delta) >= self.max_delta - 1e-12
+                                       and delta != 0.0)
+            self._delta_n += 1
 
             new_curt, n_sat = apply_inverse(curt, delta)
             self._sat_hits += n_sat
@@ -364,6 +380,15 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                                           for a in self._zone_agents])),
             "fit_gain_now": float(np.nanmean(
                 [self.est[a].fit_gain_now() for a in self._zone_agents])),
+            # THE decisive columns: is the compensator actually moving actions,
+            # and is it responding to the estimate or pinned at the rail?
+            "delta_abs": (float(np.mean(self._delta_hist[-4000:]))
+                          if self._delta_hist else np.nan),
+            "delta_clip_frac": diag.safe_ratio(self._delta_clipped,
+                                               self._delta_n),
+            "delta_nonzero_frac": (float(np.mean(
+                np.asarray(self._delta_hist[-4000:]) > 0))
+                if self._delta_hist else np.nan),
             "trP": float(np.mean([np.trace(self.est[a].P)
                                   for a in self._zone_agents])),
             "clamp_frac": float(np.mean(
