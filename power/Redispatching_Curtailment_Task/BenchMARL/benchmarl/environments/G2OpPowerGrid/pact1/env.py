@@ -38,7 +38,8 @@ import os
 import numpy as np
 
 from ..PZMAEnvWithHeuristics import PZMAEnvRecoDNLimit
-from .basis import CouplingBasis, gram_cond, ptdf_zone_coupling
+from .basis import (CouplingBasis, gram_cond, ptdf_zone_coupling,
+                    self_sensitivity_rows)
 from .compensator import (StandingLevel, action_sensitivity, apply_inverse,
                           compensation_delta)
 from .rls import RLSEstimator
@@ -61,6 +62,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                  pact1_r=1,                 # peer channels, split by PTDF strength
                  pact1_fit_floor=0.005,     # min measured fit_gain before acting
                  pact1_min_t=3.0,           # min |coef|/se on the divisor
+                 pact1_analytic_sens=True,  # divisor from PTDF, not from RLS
                  pact1_log=None,
                  pact1_log_every=200,
                  pact1_matched_band=(0.69, 0.70),
@@ -75,6 +77,10 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         self.sensor_kind = str(pact1_sensor)
         self.fit_floor = float(pact1_fit_floor)
         self.min_t = float(pact1_min_t)
+        self.use_analytic_sens = bool(pact1_analytic_sens)
+        self._last_g2op_obs = None
+        self._analytic_hits = 0
+        self._analytic_n = 0
         self._delta_hist = []
         self._delta_clipped = 0
         self._delta_n = 0
@@ -112,6 +118,10 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         self.basis = CouplingBasis(zone_names, gen_curtail_inside, env.gen_pmax,
                                    W=W, r_target=pact1_r)
         self.n_zones = self.basis.n
+        # Analytic self-sensitivity: the divisor comes from the same declared
+        # operator instead of from the RLS, which could never identify it.
+        self._selfS = self_sensitivity_rows(env, zone_names)
+        self._gen_pmax = np.asarray(env.gen_pmax, dtype=np.float64)
 
         self.est = {a: RLSEstimator(self.basis.r, mu=pact1_mu, p0=pact1_p0)
                     for a in self._zone_agents}
@@ -207,6 +217,42 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         so the wrapper and the self-check cannot drift apart on the sign."""
         return action_sensitivity(own_gain, self.basis.pmax_per_zone[agent_idx])
 
+    def _analytic_sensitivity(self, zone, g2op_obs):
+        """d(rho_i)/d(a_i) from PTDF, evaluated on the line that is BINDING now.
+
+        rho_l = |flow_l| / limit_l, and the sensor reads max rho over the zone's
+        own lines, so the derivative that matters is the one for the argmax
+        line -- which moves from step to step and is therefore computed here
+        rather than once at construction.
+
+            d(rho_l*)/d(inj_b) = sign(flow_l*) * PTDF[l*, b] / limit_l*
+            d(inj_g)/d(a_g)    = pmax_g          (a is the curtailment LIMIT
+                                                  ratio: raising it admits more
+                                                  renewable injection)
+
+        limit_l* is recovered as |flow| / rho rather than from thermal limits
+        directly, which keeps the units consistent (grid2op's limits are in amps
+        while PTDF is MW/MW) and cancels the conversion.
+
+        Returns None when the zone has no curtailable generation or the binding
+        flow is ~0, in which case the caller falls back to the learned gain.
+        """
+        if self._selfS is None or zone not in self._selfS:
+            return None
+        lines, gens, S = self._selfS[zone]
+        if not len(lines) or not len(gens):
+            return None
+        rho = np.asarray(g2op_obs.rho)[lines]
+        k = int(np.argmax(rho))
+        rho_k = float(rho[k])
+        flow_k = float(np.asarray(g2op_obs.p_or)[lines[k]])
+        if rho_k < 1e-6 or abs(flow_k) < 1e-6:
+            return None
+        inv_limit = rho_k / abs(flow_k)              # 1 / limit, in 1/MW
+        drho_da = float(np.sum(S[k, :len(gens)] * self._gen_pmax[gens])) \
+            * np.sign(flow_k) * inv_limit
+        return drho_da if np.isfinite(drho_da) else None
+
     def _compensate(self, action_dict):
         """Apply the certified channel inverse.  Returns the executed dict.
 
@@ -262,12 +308,23 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                 # rescales identically.
                 pmax_i = self.basis.pmax_per_zone[a_i]
                 se_scale = abs(pmax_i / max(pmax_i, 1.0))
+                drho_da = None
+                if self.use_analytic_sens and self._last_g2op_obs is not None:
+                    drho_da = self._analytic_sensitivity(z, self._last_g2op_obs)
+                if drho_da is not None:
+                    # Declared physics: no estimation error, so no t-test.
+                    se_arg = None
+                else:
+                    drho_da = self._sensitivity(a_i, est.beta[1])
+                    se_arg = np.sqrt(max(est.P[1, 1], 0.0)) * se_scale
+                self._analytic_hits += int(se_arg is None)
+                self._analytic_n += 1
                 delta, g = compensation_delta(
-                    ell, self._sensitivity(a_i, est.beta[1]),
+                    ell, drho_da,
                     self.trust_init, conf,
                     max_delta=self.max_delta,
                     sensitivity_floor=self.own_gain_floor,
-                    drho_da_se=np.sqrt(max(est.P[1, 1], 0.0)) * se_scale,
+                    drho_da_se=se_arg,
                     min_t=self.min_t)
             self._applied_trust[agent] = g
             self._delta_hist.append(abs(delta))
@@ -382,6 +439,8 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                 [self.est[a].fit_gain_now() for a in self._zone_agents])),
             # THE decisive columns: is the compensator actually moving actions,
             # and is it responding to the estimate or pinned at the rail?
+            "analytic_frac": diag.safe_ratio(self._analytic_hits,
+                                             self._analytic_n),
             "delta_abs": (float(np.mean(self._delta_hist[-4000:]))
                           if self._delta_hist else np.nan),
             "delta_clip_frac": diag.safe_ratio(self._delta_clipped,
@@ -433,6 +492,10 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         # different claim from persistence over 5.  If this ratio is large and
         # variable, the lag -- not the basis -- is what is killing fit_gain.
         t0 = getattr(self.env_g2op, "nb_time_step", 0)
+        # The observation the agent is acting on: the base class keeps the
+        # post-step grid2op obs here, so at this point it is the current state.
+        # The analytic divisor needs it to find which line is binding NOW.
+        self._last_g2op_obs = getattr(self, "_previous_act", None)
         exec_action, _ = self._compensate(gym_action)
 
         for agent in self._zone_agents:

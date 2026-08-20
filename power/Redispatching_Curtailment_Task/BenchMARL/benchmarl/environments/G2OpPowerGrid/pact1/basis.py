@@ -102,6 +102,44 @@ def ptdf_zone_coupling(env, zone_names, ptdf=None):
     return W
 
 
+def self_sensitivity_rows(env, zone_names, ptdf=None):
+    """S[i, g] = d(flow on i's lines) / d(injection at i's OWN gen g), in MW/MW.
+
+    The coupling basis is zero-diagonal by construction, because the diagonal is
+    not coupling.  But the CHANNEL INVERSE divides by exactly that diagonal --
+    the agent's authority over its own loading -- and learning it does not work
+    here: measured over a full 1M-frame run the estimate came out at
+    own_gain = 0.13 with se = 5.0, i.e. |t| = 0.024, never once clearing a
+    t > 3 bar in 5004 logged windows, because excitation dies as the policy
+    converges (cond_psi 108 -> 909).
+
+    It does not have to be learned.  It is the same declared operator, read on
+    the diagonal instead of off it.  Returned per (agent, own generator) so the
+    caller can weight by which line is actually binding at this step.
+    """
+    if ptdf is None:
+        ptdf = get_ptdf(env)
+    if ptdf is None:
+        return None
+    zones = _load_zones()
+    gen_bus = env.gen_to_subid
+    renewable = np.where(env.gen_renewable)[0]
+    n_cols = ptdf.shape[1]
+
+    out = {}
+    for zi in zone_names:
+        lines_i = np.asarray(zones[zi]["line_in_zone_idx"], dtype=int)
+        lines_i = lines_i[lines_i < ptdf.shape[0]]
+        gi = np.intersect1d(
+            np.asarray(zones[zi]["gen_inside_idx"], dtype=int), renewable)
+        if not len(lines_i) or not len(gi):
+            out[zi] = (lines_i, gi, np.zeros((len(lines_i), max(len(gi), 1))))
+            continue
+        buses = np.clip(gen_bus[gi], 0, n_cols - 1)
+        out[zi] = (lines_i, gi, ptdf[np.ix_(lines_i, buses)])
+    return out
+
+
 class CouplingBasis:
     """PTDF-weighted, zero-diagonal channel decomposition over zone agents.
 

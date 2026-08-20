@@ -26,6 +26,7 @@ COLUMNS = [
     # Is the compensator moving actions at all, and is it RESPONDING to the
     # estimate or pinned at the rail?  A rail-pinned delta is a constant bias,
     # not a compensation, and it is invisible in every other column.
+    "analytic_frac",              # share of steps using the PTDF divisor
     "delta_abs", "delta_clip_frac", "delta_nonzero_frac",
     "trP", "clamp_frac",          # covariance windup: tr(P) and how often bounded
     "state",                      # INERT / ASLEEP / ALIVE
