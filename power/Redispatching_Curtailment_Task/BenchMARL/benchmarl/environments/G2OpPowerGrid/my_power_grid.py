@@ -21,3 +21,6 @@ class TaskConfig:
     # PACT-1 settings.  Empty dict (the default) leaves the task byte-identical
     # to the published one, so the blind arm cannot differ by construction.
     pact1: dict = MISSING
+    # Dynamic-line-rating severity. TASK physics, applied to every algorithm.
+    # 0 = static ratings = stock grid2op; 1 = realistic IEEE 738 derating.
+    severity: float = MISSING

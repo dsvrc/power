@@ -37,17 +37,22 @@ import os
 
 import numpy as np
 
-from ..PZMAEnvWithHeuristics import PZMAEnvRecoDNLimit
 from .basis import (CouplingBasis, gram_cond, ptdf_zone_coupling,
                     self_sensitivity_rows)
+from .dlr_env import PZMAEnvDLR
 from .compensator import (StandingLevel, action_sensitivity, apply_inverse,
                           compensation_delta)
 from .rls import RLSEstimator
 from . import diagnostics as diag
 
 
-class PACT1Env(PZMAEnvRecoDNLimit):
-    """PZMAEnvRecoDNLimit + the PACT-1 estimator/compensator loop."""
+class PACT1Env(PZMAEnvDLR):
+    """PZMAEnvDLR + the PACT-1 estimator/compensator loop.
+
+    Inheriting from the DLR layer rather than from the stock task is what makes
+    `--alg MAPPO --severity X` and `--alg PACT1 --severity X` identical
+    environments: the dial is task physics, the compensator is the method.
+    """
 
     def __init__(self,
                  pact1_enabled=True,
@@ -63,6 +68,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                  pact1_fit_floor=0.005,     # min measured fit_gain before acting
                  pact1_min_t=3.0,           # min |coef|/se on the divisor
                  pact1_analytic_sens=True,  # divisor from PTDF, not from RLS
+                 pact1_max_trust=1.0,       # Phase-1 calibrated gain cap (II.3)
                  pact1_log=None,
                  pact1_log_every=200,
                  pact1_matched_band=(0.69, 0.70),
@@ -78,6 +84,29 @@ class PACT1Env(PZMAEnvRecoDNLimit):
         self.fit_floor = float(pact1_fit_floor)
         self.min_t = float(pact1_min_t)
         self.use_analytic_sens = bool(pact1_analytic_sens)
+        # THE GAIN CAP -- T4 (III.8), not a convenience knob.
+        #
+        # The gates measure ESTIMATE QUALITY, and estimate quality is not the
+        # same thing as collectively-optimal gain.  Compensation here is itself
+        # curtailment (I.5), so each agent's gain feeds the medium its peers
+        # are compensating against, and no agent feels the cost it imposes.
+        # The individually-optimal gain therefore sits ABOVE the collective one
+        # -- III.8's commons, with over-compensation measured worse than doing
+        # nothing (Ant: return 1481 at beta=0.8 against 2302 blind).
+        #
+        # Measured on this grid, 1M frames, seed 0, smoothed by quarter:
+        #     applied_trust 0.012 -> +5.4    (Q1)
+        #     applied_trust 0.080 -> +19.4   (Q2)  <- peak
+        #     applied_trust 0.124 -> +7.1    (Q3)
+        #     applied_trust 0.144 -> -16.5   (Q4)
+        # A clean inverted U, exactly T4's predicted shape.
+        #
+        # II.3 requires the gain to be RE-OPTIMISED rather than fixed, and
+        # warns that not doing so understates the result.  So this is a
+        # Phase-1 calibration parameter: swept, reported with the sweep, and
+        # calibrated on one seed then VALIDATED on held-out seeds.  Calibrating
+        # and reporting on the same seed would be fitting to the test set.
+        self.max_trust = float(pact1_max_trust)
         self._last_g2op_obs = None
         self._analytic_hits = 0
         self._analytic_n = 0
@@ -168,6 +197,7 @@ class PACT1Env(PZMAEnvRecoDNLimit):
             f"own-harm sensor  : {self.sensor_kind} rho over the zone's own lines",
             f"RLS mu / p0      : {pact1_mu} / {pact1_p0}",
             f"max |delta|      : {self.max_delta} action units",
+            f"max applied gain : {self.max_trust}   (T4 cap, III.8)",
             f"log              : {pact1_log or '(off)'}",
         ]) + "\n" + self.basis.report())
 
@@ -288,6 +318,11 @@ class PACT1Env(PZMAEnvRecoDNLimit):
                         floor=self.fit_floor)
                     self._gate_parts[agent] = (c_pred, c_div, c_ready)
                     conf = c_pred * c_div * c_ready
+                    # Cap the APPLIED gain, not the prior: the gates stay
+                    # untouched and keep reporting honestly, while T4's
+                    # collective optimum bounds what actually reaches the grid.
+                    if self.trust_init > 0:
+                        conf = min(conf, self.max_trust / self.trust_init)
                 elif self.gate_kind == "prediction_only":
                     conf = est.confidence_at(psi)      # ablation: no divisor gate
                 elif self.gate_kind == "trace":

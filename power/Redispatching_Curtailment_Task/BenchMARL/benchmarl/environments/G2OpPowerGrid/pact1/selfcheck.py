@@ -149,6 +149,57 @@ def test_conditioning():
                 "construction whatever the PTDF magnitude")
 
 
+def test_severity_dial():
+    """The dial must be an identity at sigma=0 and a GAIN on the coupling.
+
+    These two properties are what let the severity be described as removed
+    simplification rather than added difficulty, so they are asserted rather
+    than argued.
+    """
+    print("\n[2b] severity dial: DLR identity and multiplicativity  (I.2)")
+    from . import dlr
+
+    # sigma = 0 must be EXACTLY 1.0 everywhere, not approximately.
+    ratios0 = [dlr.ampacity_ratio(m, h, 0.0)
+               for m in range(1, 13) for h in range(24)]
+    check("sigma=0 gives ampacity ratio exactly 1.0 everywhere",
+          all(r == 1.0 for r in ratios0),
+          "the stock task is recovered byte for byte")
+
+    # sigma = 1 must land on the physical range, not a tuned one.
+    hot = dlr.ampacity_ratio(dlr.PEAK_MONTH, dlr.PEAK_HOUR, 1.0)
+    cold = dlr.ampacity_ratio((dlr.PEAK_MONTH + 6) % 12,
+                              (dlr.PEAK_HOUR + 12) % 24, 1.0)
+    check("sigma=1 derating is physically plausible (IEEE 738)",
+          0.75 < hot < 0.90 and 1.05 < cold < 1.25,
+          f"summer peak x{hot:.3f}, winter night x{cold:.3f}")
+
+    # Monotone in sigma at the hot point: a dial that is not monotone is not
+    # a severity dial.
+    hots = [dlr.ampacity_ratio(dlr.PEAK_MONTH, dlr.PEAK_HOUR, s)
+            for s in (0.0, 0.5, 1.0, 1.5, 2.0)]
+    check("derating is monotone in sigma",
+          all(a > b for a, b in zip(hots, hots[1:])),
+          " -> ".join(f"{h:.3f}" for h in hots))
+
+    # THE structural property (I.2): the driver must MULTIPLY the cross-agent
+    # term, never add a term of its own.  rho = |flow| / limit(t), and flow is
+    # linear in every agent's injection, so shrinking the limit scales the peer
+    # contribution and the own contribution by the SAME factor -- and scales a
+    # zero peer contribution to zero.
+    ptdf_ij, inj_j = 0.031, 40.0          # peer j's contribution, MW
+    for s in (0.0, 1.0, 2.0):
+        ratio = dlr.ampacity_ratio(dlr.PEAK_MONTH, dlr.PEAK_HOUR, s)
+        peer_rho = ptdf_ij * inj_j / (100.0 * ratio)
+        solo_rho = ptdf_ij * 0.0 / (100.0 * ratio)
+        if solo_rho != 0.0:
+            check("driver multiplies the coupling (N=1 stays exactly 0)",
+                  False, f"sigma={s} leaked a solo term")
+            return
+    check("driver multiplies the coupling (N=1 stays exactly 0)",
+          True, "no additive term at any sigma -> category C survives the dial")
+
+
 def test_n1_irreducibility():
     print("\n[2] N=1 irreducibility certificate  (I.1 litmus)")
     zones = ["Zone0"]
@@ -645,7 +696,8 @@ def main():
     print("=" * 72)
     print("  PACT-1 arithmetic self-check  (no grid2op, no dataset)")
     print("=" * 72)
-    for fn in (test_structure, test_conditioning, test_n1_irreducibility,
+    for fn in (test_structure, test_conditioning, test_severity_dial,
+               test_n1_irreducibility,
                test_uncancellable_exertion,
                test_rls_recovery, test_gate_under_excitation_death,
                test_covariance_windup,

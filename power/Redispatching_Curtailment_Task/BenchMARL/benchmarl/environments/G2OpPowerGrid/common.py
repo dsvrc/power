@@ -41,10 +41,20 @@ class G2OpPowerGridClass(TaskClass):
         # arm difference cannot be an algorithm difference.  With pact1 absent
         # or disabled this is byte-identical to the published task.
         pact1_cfg = config.pop("pact1", None) or {}
+        # Severity is TASK physics, not method configuration: it is popped here
+        # and passed to whichever env class is built, so every algorithm sees
+        # identical dynamics at a given sigma.  severity == 0 keeps the stock
+        # class and the stock code path exactly.
+        severity = float(config.pop("severity", 0.0) or 0.0)
         if pact1_cfg.get("enabled", False):
             from .pact1.env import PACT1Env
-            env_pz = PACT1Env(**{f"pact1_{k}" if not k.startswith("pact1_") else k: v
-                                 for k, v in pact1_cfg.items()}, **config)
+            env_pz = PACT1Env(
+                **{f"pact1_{k}" if not k.startswith("pact1_") else k: v
+                   for k, v in pact1_cfg.items()},
+                severity=severity, **config)
+        elif severity > 0.0:
+            from .pact1.dlr_env import PZMAEnvDLR
+            env_pz = PZMAEnvDLR(severity=severity, **config)
         else:
             env_pz = PZMAEnvRecoDNLimit(**config)
         return lambda: PettingZooWrapper(

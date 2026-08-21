@@ -69,6 +69,13 @@ def cli():
                                 PACT-1 estimator/compensator wrapped around the env, so
                                 the two share host hyperparameters exactly and 'MAPPO'
                                 is the matched blind arm. (default: MAPPO)""")
+    parser.add_argument('--severity', type=float, default=0.0,
+                        help="""Dynamic-line-rating severity. TASK physics: applied
+                                identically to MAPPO, MASAC and PACT1. 0 = static
+                                ratings = stock grid2op byte for byte. 1 = realistic
+                                IEEE 738 derating for the grid's own region. >1 is
+                                beyond-physical and must be labelled as such.
+                                (default: 0.0)""")
     parser.add_argument('--pact1_trust', type=float, default=0.90,
                         help="""PACT-1 trust prior. Initialise NEAR the optimum and let
                                 the policy pull it down -- a hedged 0.5 measured ~1800
@@ -78,6 +85,14 @@ def cli():
                         help="""Confidence gate. 'prediction' (default) = prediction gate
                                 x divisor gate x readiness. 'trace' is the known-bad gate,
                                 kept runnable as an ablation. (default: prediction)""")
+    parser.add_argument('--pact1_max_trust', type=float, default=1.0,
+                        help="""Cap on the APPLIED compensation gain (T4, III.8).
+                                Compensation feeds the medium it compensates
+                                against, so the individually-optimal gain sits above
+                                the collective one. A Phase-1 calibration parameter
+                                (II.3): sweep it, report the sweep, calibrate on one
+                                seed and validate on held-out seeds. (default: 1.0,
+                                i.e. uncapped)""")
     parser.add_argument('--pact1_sensor', type=str, default="max",
                         choices=["mean", "max"],
                         help="""Own-harm sensor: mean or max rho over the zone's own
@@ -187,12 +202,17 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown algorithm: {alg}")
 
+    # Severity is task physics: set for EVERY algorithm, never inside the
+    # pact1 block. An arm-specific dial would be worthless as evidence.
+    task.config["severity"] = args.severity
+
     if alg == "PACT1":
         task.config["pact1"] = {
             "enabled": True,
             "trust": args.pact1_trust,
             "gate": args.pact1_gate,
             "sensor": args.pact1_sensor,
+            "max_trust": args.pact1_max_trust,
             "log": os.path.join(ROOT_DIR, args.pact1_log),
         }
     
