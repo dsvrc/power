@@ -118,15 +118,32 @@ def privileged_action(env, obs, ptdf, curtail_ids, gen_bus, gen_pmax,
 
 
 def roll(env, base_limits, sigma, n_episodes, privileged, ptdf, curtail_ids,
-         gen_bus, gen_pmax, seed=0, max_steps=2016):
+         gen_bus, gen_pmax, seed=0, max_steps=2016, chronic_ids=None,
+         window=200):
+    """Roll a fixed set of chronics at one severity.
+
+    Two things here are load-bearing and were wrong in the first version:
+
+    1. The thermal limit is set AFTER reset and never followed by another
+       reset.  reset() restores the configured limits, so setting-then-
+       resetting silently discarded the entire dial.
+    2. The chronics are pinned with set_id, so every sigma sees THE SAME weeks.
+       Previously the extra reset also advanced the scenario, so each sigma was
+       measured on a different sample of the year -- which is what produced
+       max_rho FALLING as limits shrank, a physical impossibility.
+    """
     env.seed(seed)
-    lens, rhos, near, overl = [], [], [], []
-    for _ in range(n_episodes):
+    lens, rhos, near, overl, rho_win = [], [], [], [], []
+    for ep in range(n_episodes):
+        if chronic_ids is not None:
+            try:
+                env.set_id(int(chronic_ids[ep % len(chronic_ids)]))
+            except Exception:                                # noqa: BLE001
+                pass
         obs = env.reset()
         if sigma > 0:
             env.set_thermal_limit(base_limits * dlr.ampacity_ratio(
                 obs.month, obs.hour_of_day, sigma))
-            obs = env.reset()          # limits take effect from a clean state
         done, steps = False, 0
         while not done and steps < max_steps:
             act = None
@@ -141,6 +158,12 @@ def roll(env, base_limits, sigma, n_episodes, privileged, ptdf, curtail_ids,
             rhos.append(float(obs.rho.max()))
             near.append(float((obs.rho > 0.95).mean()))
             overl.append(float((obs.rho > 1.0).sum()))
+            # Loading over a FIXED early window, so a run that dies early is
+            # not credited with a low mean rho just because it never saw the
+            # hard part.  Survivorship bias otherwise makes higher sigma look
+            # calmer, which is the opposite of the truth.
+            if steps <= window:
+                rho_win.append(float(obs.rho.max()))
             # Only touch limits on a live environment: after a game over
             # grid2op refuses, and that is what crashed the first version.
             if sigma > 0 and not done:
@@ -148,7 +171,8 @@ def roll(env, base_limits, sigma, n_episodes, privileged, ptdf, curtail_ids,
                     obs.month, obs.hour_of_day, sigma))
         lens.append(steps)
     return (float(np.mean(lens)), float(np.mean(rhos)),
-            float(np.mean(near)), float(np.mean(overl)))
+            float(np.mean(near)), float(np.mean(overl)),
+            float(np.mean(rho_win)) if rho_win else float("nan"))
 
 
 def main():
@@ -185,21 +209,50 @@ def main():
     print(f"  ampacity ratio at sigma=0 is exactly 1.0: {ok_g2}"
           f"  -> stock task byte-identical")
 
+    # ---- G0: does the dial reach the physics AT ALL? --------------------
+    # Cheap, decisive, and it is the check whose absence let a silently
+    # discarded dial produce five sigma rows of pure scenario noise.
+    print("\n[G0] dial actually changes rho (same chronic, limits only)")
+    env.set_id(0)
+    obs = env.reset()
+    for _ in range(20):
+        obs, _, done, _ = env.step(env.action_space({}))
+        if done:
+            obs = env.reset()
+    rho_static = float(obs.rho.max())
+    ratio = dlr.ampacity_ratio(obs.month, obs.hour_of_day, 2.0)
+    env.set_thermal_limit(base_limits * ratio)
+    obs2, _, _, _ = env.step(env.action_space({}))
+    applied = np.asarray(env.get_thermal_limit(), dtype=np.float64)
+    took = np.allclose(applied, base_limits * ratio, rtol=1e-6)
+    print(f"  ampacity ratio applied: x{ratio:.3f}   limits took effect: {took}")
+    print(f"  max_rho {rho_static:.4f} -> {float(obs2.rho.max()):.4f}  "
+          f"(expect roughly x{1/ratio:.2f} if the dial is live)")
+    if not took:
+        print("  !! the environment discarded the thermal limits; every gate")
+        print("     below is measuring scenario noise, not severity. STOP.")
+    env.set_thermal_limit(base_limits)
+
+    # Same chronics for every sigma: severity must be the ONLY difference.
+    chronic_ids = list(range(args.episodes))
     print(f"\nrolling {args.episodes} episodes per sigma, "
-          f"max {args.max_steps} steps ...")
+          f"max {args.max_steps} steps, chronics pinned to {chronic_ids} ...")
     rows = []
     for s in args.sigmas:
         print(f"\n  {dlr.describe(s)}")
-        ln_b, rho_b, nr_b, ov_b = roll(
+        ln_b, rho_b, nr_b, ov_b, rw_b = roll(
             env, base_limits, s, args.episodes, False, ptdf, curtail_ids,
-            env.gen_to_subid, env.gen_pmax, args.seed, args.max_steps)
-        ln_p, rho_p, nr_p, ov_p = roll(
+            env.gen_to_subid, env.gen_pmax, args.seed, args.max_steps,
+            chronic_ids)
+        ln_p, rho_p, nr_p, ov_p, _ = roll(
             env, base_limits, s, args.episodes, True, ptdf, curtail_ids,
-            env.gen_to_subid, env.gen_pmax, args.seed, args.max_steps)
+            env.gen_to_subid, env.gen_pmax, args.seed, args.max_steps,
+            chronic_ids)
         rows.append(dict(sigma=s, len_b=ln_b, rho_b=rho_b, near_b=nr_b,
-                         len_p=ln_p, rho_p=rho_p))
+                         len_p=ln_p, rho_p=rho_p, rw_b=rw_b))
         print(f"    reference : steps={ln_b:7.1f} max_rho={rho_b:.3f} "
-              f"near_limit={nr_b:.4f} overloaded/step={ov_b:.3f}")
+              f"rho(first {200})={rw_b:.3f} near_limit={nr_b:.4f} "
+              f"overloaded/step={ov_b:.3f}")
         print(f"    privileged: steps={ln_p:7.1f} max_rho={rho_p:.3f} "
               f"near_limit={nr_p:.4f} overloaded/step={ov_p:.3f}")
 
@@ -209,14 +262,24 @@ def main():
         print("     than the reference. G4 is then meaningless -- fix the")
         print("     controller before reading any gate below.")
 
+    # Sanity: rho over the fixed early window MUST rise with sigma. If it does
+    # not, the dial is not reaching the physics and no gate below means
+    # anything -- this is exactly the failure the first version hid.
+    rw = [r["rw_b"] for r in rows]
+    monotone = all(b >= a - 1e-9 for a, b in zip(rw, rw[1:]))
+    print(f"\n[G0b] rho over first 200 steps vs sigma: "
+          f"{' -> '.join(f'{v:.3f}' for v in rw)}")
+    print(f"      rises with sigma: {monotone}"
+          f"{'' if monotone else '   !! DIAL NOT REACHING PHYSICS -- STOP'}")
+
     print("\n" + "=" * 74)
     print(f"{'sigma':>6} {'ref steps':>10} {'vs s=0':>8} {'priv steps':>11} "
-          f"{'priv/ref':>9} {'max_rho':>8} {'near_lim':>9}  gates")
+          f"{'priv/ref':>9} {'rho200':>7} {'near_lim':>9}  gates")
     recommended = None
     for r in rows:
         hurt = r["len_b"] < 0.90 * base["len_b"]
         priv_ok = r["len_p"] >= 0.95 * base["len_p"]
-        coupling_up = r["near_b"] > base["near_b"] * 1.10
+        coupling_up = r["rw_b"] > base["rw_b"] * 1.02
         tags = ["G3+" if hurt else "G3-",
                 "G4+" if priv_ok else "G4-BLOCK",
                 "G5+" if coupling_up else "G5-"]
@@ -226,7 +289,7 @@ def main():
         print(f"{r['sigma']:6.2f} {r['len_b']:10.1f} "
               f"{100*(r['len_b']/max(base['len_b'],1e-9)-1):+7.1f}% "
               f"{r['len_p']:11.1f} {r['len_p']/max(r['len_b'],1e-9):9.2f} "
-              f"{r['rho_b']:8.3f} {r['near_b']:9.4f}  {' '.join(tags)}")
+              f"{r['rw_b']:7.3f} {r['near_b']:9.4f}  {' '.join(tags)}")
 
     print("\nG3 the dial must hurt the reference controller (I.2 constraint 4)")
     print("G4 BLOCKING: privileged controller must still survive; failing it")
