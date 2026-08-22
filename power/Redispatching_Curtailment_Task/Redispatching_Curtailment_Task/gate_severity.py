@@ -192,9 +192,14 @@ def roll(env, base_limits, sigma, n_episodes, privileged, ptdf, curtail_ids,
                 env.set_thermal_limit(base_limits * dlr.ampacity_ratio(
                     obs.month, obs.hour_of_day, sigma))
         lens.append(steps)
+    # Per-episode lengths are returned, not just their mean: the gap statistic
+    # is a ratio of two noisy means, and with 8 episodes a reading of "1.30
+    # against a 1.30 threshold" is a coin flip.  Anything that goes into the
+    # commit history needs an interval attached.
     return (float(np.mean(lens)), float(np.mean(rhos)),
             float(np.mean(near)), float(np.mean(overl)),
-            float(np.mean(rho_win)) if rho_win else float("nan"))
+            float(np.mean(rho_win)) if rho_win else float("nan"),
+            np.asarray(lens, dtype=np.float64))
 
 
 def main():
@@ -280,12 +285,24 @@ def main():
     months = [month_of(p) for p in names]
     summer = [i for i, m in enumerate(months) if m in (6, 7, 8)]
     winter = [i for i, m in enumerate(months) if m in (12, 1, 2)]
+    def spread(pool, k):
+        """Even coverage of the pool, not its first k entries.
+
+        Taking summer[:8] gave eight consecutive June weeks; peak heat is late
+        July (PEAK_MONTH = 7.5), so that samples the mild end of the season and
+        understates the derating the dial is meant to apply.
+        """
+        if not pool or k <= 0:
+            return []
+        step = max(1, len(pool) // k)
+        return [pool[min(i * step, len(pool) - 1)] for i in range(k)]
+
     if args.season == "summer" and summer:
-        chronic_ids = summer[:args.episodes]
+        chronic_ids = spread(summer, args.episodes)
     elif args.season == "winter" and winter:
-        chronic_ids = winter[:args.episodes]
+        chronic_ids = spread(winter, args.episodes)
     else:
-        chronic_ids = list(range(args.episodes))
+        chronic_ids = spread(list(range(len(names))), args.episodes)
     used_months = sorted({months[i] for i in chronic_ids if months[i]})
     print(f"\nchronics: {len(names)} available, "
           f"{len(summer)} summer / {len(winter)} winter")
@@ -298,16 +315,17 @@ def main():
     rows = []
     for s in args.sigmas:
         print(f"\n  {dlr.describe(s)}")
-        ln_b, rho_b, nr_b, ov_b, rw_b = roll(
+        ln_b, rho_b, nr_b, ov_b, rw_b, eps_b = roll(
             env, base_limits, s, args.episodes, False, ptdf, curtail_ids,
             env.gen_to_subid, env.gen_pmax, args.seed, args.max_steps,
             chronic_ids)
-        ln_p, rho_p, nr_p, ov_p, _ = roll(
+        ln_p, rho_p, nr_p, ov_p, _, eps_p = roll(
             env, base_limits, s, args.episodes, True, ptdf, curtail_ids,
             env.gen_to_subid, env.gen_pmax, args.seed, args.max_steps,
             chronic_ids)
         rows.append(dict(sigma=s, len_b=ln_b, rho_b=rho_b, near_b=nr_b,
-                         len_p=ln_p, rho_p=rho_p, rw_b=rw_b))
+                         len_p=ln_p, rho_p=rho_p, rw_b=rw_b,
+                         eps_b=eps_b, eps_p=eps_p))
         print(f"    reference : steps={ln_b:7.1f} max_rho={rho_b:.3f} "
               f"rho(first {200})={rw_b:.3f} near_limit={nr_b:.4f} "
               f"overloaded/step={ov_b:.3f}")
@@ -330,16 +348,29 @@ def main():
     print(f"      rises with sigma: {monotone}"
           f"{'' if monotone else '   !! DIAL NOT REACHING PHYSICS -- STOP'}")
 
-    print("\n" + "=" * 78)
-    print(f"{'sigma':>6} {'ref':>8} {'vs s=0':>8} {'priv':>8} {'G4a':>7} "
-          f"{'G4b gap':>8} {'rho200':>7}  gates")
+    # Bootstrap the coordination gap: it is a ratio of two noisy means, and a
+    # point estimate landing on the threshold decides nothing.
+    rng = np.random.default_rng(0)
+    for r in rows:
+        b, p = r["eps_b"], r["eps_p"]
+        boot = []
+        for _ in range(5000):
+            bb = rng.choice(b, len(b), replace=True).mean()
+            pp = rng.choice(p, len(p), replace=True).mean()
+            boot.append(pp / max(bb, 1e-9))
+        r["gap_lo"], r["gap_hi"] = np.percentile(boot, [2.5, 97.5])
+
+    print("\n" + "=" * 86)
+    print(f"{'sigma':>6} {'ref':>8} {'vs s=0':>8} {'priv':>8} {'G4a':>6} "
+          f"{'G4b gap':>8} {'gap 95% CI':>18} {'rho200':>7}  gates")
     rec_strict, rec_relaxed = None, None
     for r in rows:
         hurt = r["len_b"] < 0.90 * base["len_b"]                    # G3
         g4a = r["len_p"] / max(base["len_p"], 1e-9)                 # capacity
         gap = r["len_p"] / max(r["len_b"], 1e-9)                    # coordination
         g4a_ok = g4a >= 0.95
-        g4b_ok = gap >= 1.30
+        # Require the CI's lower bound to clear the bar, not the point estimate.
+        g4b_ok = r["gap_lo"] >= 1.30
         g5 = r["rw_b"] > base["rw_b"] * 1.02
         tags = ["G3+" if hurt else "G3-",
                 "G4a+" if g4a_ok else "G4a-",
@@ -352,7 +383,8 @@ def main():
                 rec_relaxed = r["sigma"]
         print(f"{r['sigma']:6.2f} {r['len_b']:8.1f} "
               f"{100*(r['len_b']/max(base['len_b'],1e-9)-1):+7.1f}% "
-              f"{r['len_p']:8.1f} {g4a:7.2f} {gap:8.2f} {r['rw_b']:7.3f}  "
+              f"{r['len_p']:8.1f} {g4a:6.2f} {gap:8.2f} "
+              f"[{r['gap_lo']:6.2f},{r['gap_hi']:6.2f}] {r['rw_b']:7.3f}  "
               f"{' '.join(tags)}")
 
     print("\nG4 has two readings and they answer different questions:")
