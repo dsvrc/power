@@ -252,11 +252,23 @@ if __name__ == "__main__":
     # config.config.update(...) and would otherwise silently overwrite it --
     # the run would then report one season on the command line and train on
     # another. Task physics, so it applies to every algorithm alike.
+    # MEMORY: PZMultiAgentEnv switches to MultifolderWithCache whenever a
+    # filter is set, and that caches every SELECTED chronic in RAM -- paid once
+    # per collector worker.  Measured on this grid: a 3-month filter (208
+    # chronics) cost 13 GB in one process, so 12 workers needed ~156 GB and the
+    # children were killed, surfacing only as EOFError.  A 1-month filter (~69
+    # chronics) is what the original ".*-02-.*$" default was, and it fits.
+    #
+    # July and February are also the right months on the merits: they are the
+    # extremes of their seasons, so the severity arm gets the strongest
+    # derating (x0.8247) and the placebo arm the cleanest null (x1.0000).
     CHRONICS_PRESETS = {
-        "summer": r".*-0[678]-.*$",        # Jun-Aug: derating is active
-        "winter": r".*-(12|01|02)-.*$",    # Dec-Feb: ampacity clips to 1.000
-        "feb": r".*-02-.*$",               # the previous default
-        "all": None,
+        "summer": r".*-07-.*$",            # July: peak derating, ~69 chronics
+        "winter": r".*-02-.*$",            # February: ratio is exactly 1.000
+        "jja": r".*-0[678]-.*$",           # Jun-Aug: ~208 chronics, ~13 GB/worker
+        "djf": r".*-(12|01|02)-.*$",       # Dec-Feb: same memory warning
+        "feb": r".*-02-.*$",               # alias for the previous default
+        "all": None,                       # 832 chronics: will not fit
     }
     if args.chronics is not None:
         task.config["regex_filter_chronics"] = CHRONICS_PRESETS.get(

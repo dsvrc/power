@@ -14,13 +14,19 @@ task:
     # gate_severity.py --season winter: all five sigma rows byte-identical
     # (reference 305.8 steps, privileged 441.5, rho200 0.914).
     #
-    #   summer  ".*-0[678]-.*$"      June-August, where derating bites
-    #   winter  ".*-(12|01|02)-.*$"  placebo arm: dial configured but inert
-    #   feb     ".*-02-.*$"          the previous default (a winter subset)
+    #   summer  ".*-07-.*$"          July: peak derating x0.8247, ~69 chronics
+    #   winter  ".*-02-.*$"          February: ratio exactly 1.000 (placebo)
+    #   jja/djf  3-month versions    ~208 chronics -- see the memory warning
+    #
+    # MEMORY, measured: a filter switches the env to MultifolderWithCache,
+    # which holds every SELECTED chronic in RAM, and the collector pays that
+    # per worker.  A 3-month filter cost 13 GB in one process; 12 workers then
+    # needed ~156 GB and the children were OOM-killed (visible only as
+    # EOFError from a closed pipe).  Keep to one month per season.
     #
     # Override per run with --chronics rather than editing this file, so the
     # summer and winter arms differ only by a flag on the command line.
-    regex_filter_chronics: ".*-0[678]-.*$"
+    regex_filter_chronics: ".*-07-.*$"
 
 algorithm: {}
 

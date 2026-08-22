@@ -75,14 +75,31 @@ def main():
         traceback.print_exc()
         return 1
 
-    print(f"RSS after build : {rss_mb():.0f} MB")
-    n_chron = len(env.env_g2op.chronics_handler.real_data.subpaths)
-    print(f"chronics selected by filter: {n_chron}")
-    print(f"chronics_class: {type(env.env_g2op.chronics_handler.real_data).__name__}")
-    if n_chron > 100:
-        print(f"  NOTE: MultifolderWithCache holds all {n_chron} in RAM, and the")
-        print(f"        collector pays that PER WORKER. With 12 workers that is")
-        print(f"        12x this process's cache footprint.")
+    rss = rss_mb()
+    print(f"RSS after build : {rss:.0f} MB")
+    real = env.env_g2op.chronics_handler.real_data
+    n_all = len(real.subpaths)
+    # subpaths is every chronic DISCOVERED, not the filtered subset -- reading
+    # it as "selected" made a working filter look broken.  The filtered set
+    # lives in the order/cache attributes, which differ across grid2op versions.
+    n_sel = None
+    for attr in ("_order", "_prev_cache_id", "_cached_data"):
+        v = getattr(real, attr, None)
+        if v is not None and hasattr(v, "__len__"):
+            n_sel = len(v)
+            break
+    print(f"chronics discovered: {n_all}   selected by filter: "
+          f"{n_sel if n_sel is not None else 'unknown'}")
+    print(f"chronics_class: {type(real).__name__}")
+
+    n_workers = 12
+    print(f"\nMEMORY PROJECTION (the failure mode that shows up as EOFError):")
+    print(f"  this process {rss:.0f} MB  x  {n_workers} workers "
+          f"= {rss*n_workers/1024:.0f} GB")
+    if rss * n_workers / 1024 > 60:
+        print(f"  !! that will OOM on most nodes. Narrow the filter to one")
+        print(f"     month (--chronics summer = July, ~69 chronics) or lower")
+        print(f"     --n_envs. Check `free -g` against the number above.")
 
     try:
         obs, _ = env.reset()
