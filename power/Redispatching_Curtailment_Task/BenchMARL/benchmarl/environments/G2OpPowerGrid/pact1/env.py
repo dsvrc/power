@@ -476,6 +476,14 @@ class PACT1Env(PZMAEnvDLR):
             # and is it responding to the estimate or pinned at the rail?
             "analytic_frac": diag.safe_ratio(self._analytic_hits,
                                              self._analytic_n),
+            # Severity liveness: dlr_ratio should sit below 1 through summer
+            # afternoons, and dlr_skip should stay near 0.  A skip fraction
+            # near 1 means the severity arm is really a sigma=0 arm.
+            "dlr_ratio": float(getattr(self, "_last_ratio", 1.0)),
+            "dlr_skip": diag.safe_ratio(
+                getattr(self, "_dlr_skipped", 0),
+                getattr(self, "_dlr_skipped", 0)
+                + getattr(self, "_dlr_applied", 0)),
             "delta_abs": (float(np.mean(self._delta_hist[-4000:]))
                           if self._delta_hist else np.nan),
             "delta_clip_frac": diag.safe_ratio(self._delta_clipped,

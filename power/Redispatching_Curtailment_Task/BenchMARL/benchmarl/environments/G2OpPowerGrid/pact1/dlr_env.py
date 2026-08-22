@@ -31,6 +31,11 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
         self._dlr_step = 0
         self._last_ratio = 1.0
         self._last_A = 0.0
+        # Counters, so "the dial silently stopped applying" is visible rather
+        # than invisible.  A high skip fraction means the limits are not
+        # reaching the physics and the severity arm is really a sigma=0 arm.
+        self._dlr_applied = 0
+        self._dlr_skipped = 0
 
         if self.severity > 0.0:
             try:
@@ -47,6 +52,22 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
             print("=" * 72)
 
     # ------------------------------------------------------------------
+    def _set_limits(self, limits):
+        """set_thermal_limit, guarded.
+
+        grid2op refuses the call on an environment that is not initialised --
+        freshly forked, or sitting on a game over -- and raises.  Inside a
+        collector worker that exception kills the child and the parent sees only
+        `EOFError` from the pipe, with no traceback pointing here.  Failing soft
+        is right: the limits are re-applied on the very next step anyway.
+        """
+        try:
+            self.env_g2op.set_thermal_limit(limits)
+            return True
+        except Exception:                                     # noqa: BLE001
+            self._dlr_skipped += 1
+            return False
+
     def _apply_dlr(self, g2op_obs):
         """Rescale every line's limit by the current ampacity ratio."""
         if self.severity <= 0.0 or self._base_limits is None or g2op_obs is None:
@@ -63,18 +84,26 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
         # a per-line ratio would need per-line weather this dataset does not
         # have.  Uniform scaling also keeps the dial from re-shaping WHICH line
         # binds, so sigma changes severity without changing the task's identity.
-        self.env_g2op.set_thermal_limit(self._base_limits * ratio)
+        if self._set_limits(self._base_limits * ratio):
+            self._dlr_applied += 1
 
     def step(self, gym_action):
         out = super().step(gym_action)
-        self._apply_dlr(getattr(self, "_previous_act", None))
+        # out is (obs, rew, done, truncated, info); done is a per-agent dict.
+        done = out[2]
+        finished = any(done.values()) if isinstance(done, dict) else bool(done)
+        if not finished:
+            self._apply_dlr(getattr(self, "_previous_act", None))
         return out
 
     def reset(self, *, seed=None, options=None):
-        # Restore static ratings before reset so chronic selection and the
-        # heuristic warmup see the same grid every episode.
-        if self.severity > 0.0 and self._base_limits is not None:
-            self.env_g2op.set_thermal_limit(self._base_limits)
+        # Reset FIRST, then touch the limits.  Doing it the other way round
+        # calls set_thermal_limit on an uninitialised env, which is exactly how
+        # every collector worker died at startup.  Restoring the static ratings
+        # here still gives each episode the same starting grid, because the
+        # ambient ratio is re-applied immediately afterwards.
         obs, info = super().reset(seed=seed, options=options)
-        self._apply_dlr(getattr(self, "_previous_act", None))
+        if self.severity > 0.0 and self._base_limits is not None:
+            self._set_limits(self._base_limits)
+            self._apply_dlr(getattr(self, "_previous_act", None))
         return obs, info
