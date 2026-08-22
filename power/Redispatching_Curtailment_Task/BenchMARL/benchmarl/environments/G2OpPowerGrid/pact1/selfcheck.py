@@ -170,9 +170,27 @@ def test_severity_dial():
     hot = dlr.ampacity_ratio(dlr.PEAK_MONTH, dlr.PEAK_HOUR, 1.0)
     cold = dlr.ampacity_ratio((dlr.PEAK_MONTH + 6) % 12,
                               (dlr.PEAK_HOUR + 12) % 24, 1.0)
-    check("sigma=1 derating is physically plausible (IEEE 738)",
-          0.75 < hot < 0.90 and 1.05 < cold < 1.25,
-          f"summer peak x{hot:.3f}, winter night x{cold:.3f}")
+    raw_cold = dlr.ampacity_ratio((dlr.PEAK_MONTH + 6) % 12,
+                                  (dlr.PEAK_HOUR + 12) % 24, 1.0,
+                                  derate_only=False)
+    check("sigma=1 summer derating is physically plausible (IEEE 738)",
+          0.75 < hot < 0.90, f"summer peak x{hot:.3f}")
+    # Derate-only: the dial must NEVER invent capacity.  Two-sided scaling made
+    # sigma=2 apply x1.269 on winter chronics and the task got strictly easier
+    # (survival 350 -> 901 steps).
+    check("dial never uprates above the static rating",
+          cold == 1.0 and raw_cold > 1.0,
+          f"winter clipped to {cold:.3f} (raw physics would be {raw_cold:.3f})")
+
+    # The severity dial must be monotone in DIFFICULTY, which means the ratio
+    # must be non-increasing in sigma at every month/hour, not just the peak.
+    worst = 0.0
+    for m in range(1, 13):
+        for h in range(24):
+            rs = [dlr.ampacity_ratio(m, h, s) for s in (0.0, 0.5, 1.0, 2.0)]
+            worst = max(worst, max((b - a) for a, b in zip(rs, rs[1:])))
+    check("ratio is non-increasing in sigma at EVERY month/hour",
+          worst <= 1e-12, f"largest increase found: {worst:.3g}")
 
     # Monotone in sigma at the hot point: a dial that is not monotone is not
     # a severity dial.

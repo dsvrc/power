@@ -182,6 +182,10 @@ def main():
     ap.add_argument("--episodes", type=int, default=6)
     ap.add_argument("--max-steps", type=int, default=2016)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--season", choices=["summer", "winter", "any"],
+                    default="summer",
+                    help="summer = where derating bites; winter = placebo arm "
+                         "where the dial provably does nothing")
     args = ap.parse_args()
 
     env = make_env()
@@ -220,23 +224,55 @@ def main():
         if done:
             obs = env.reset()
     rho_static = float(obs.rho.max())
-    ratio = dlr.ampacity_ratio(obs.month, obs.hour_of_day, 2.0)
+    # Evaluate at the SUMMER PEAK, not at whatever timestamp the rollout
+    # happened to reach.  The first version read a January observation, got an
+    # uprate of x1.269, and reported the dial as working while it was making
+    # the grid easier.
+    ratio = dlr.ampacity_ratio(dlr.PEAK_MONTH, dlr.PEAK_HOUR, 2.0)
     env.set_thermal_limit(base_limits * ratio)
     obs2, _, _, _ = env.step(env.action_space({}))
     applied = np.asarray(env.get_thermal_limit(), dtype=np.float64)
     took = np.allclose(applied, base_limits * ratio, rtol=1e-6)
-    print(f"  ampacity ratio applied: x{ratio:.3f}   limits took effect: {took}")
+    print(f"  summer-peak ampacity ratio: x{ratio:.3f} (must be < 1)   "
+          f"limits took effect: {took}")
     print(f"  max_rho {rho_static:.4f} -> {float(obs2.rho.max()):.4f}  "
           f"(expect roughly x{1/ratio:.2f} if the dial is live)")
-    if not took:
-        print("  !! the environment discarded the thermal limits; every gate")
-        print("     below is measuring scenario noise, not severity. STOP.")
+    if not took or ratio >= 1.0:
+        print("  !! dial not derating; every gate below is noise. STOP.")
     env.set_thermal_limit(base_limits)
 
-    # Same chronics for every sigma: severity must be the ONLY difference.
-    chronic_ids = list(range(args.episodes))
+    # ---- pick chronics from the season where derating exists -------------
+    # Thermal stress is a summer phenomenon.  Winter chronics clip to a ratio
+    # of exactly 1.0, so a sweep run on them measures nothing -- which is what
+    # happened when ids 0-5 (January) were used, and is also why the shipped
+    # training filter ".*-02-.*$" (February) would have been blind to the dial.
+    # Winter is therefore kept as an explicit PLACEBO arm rather than discarded.
+    names = list(env.chronics_handler.real_data.subpaths)
+    def month_of(path):
+        base = os.path.basename(str(path))
+        for part in base.replace("_", "-").split("-"):
+            if len(part) == 2 and part.isdigit() and 1 <= int(part) <= 12:
+                return int(part)
+        return None
+
+    months = [month_of(p) for p in names]
+    summer = [i for i, m in enumerate(months) if m in (6, 7, 8)]
+    winter = [i for i, m in enumerate(months) if m in (12, 1, 2)]
+    if args.season == "summer" and summer:
+        chronic_ids = summer[:args.episodes]
+    elif args.season == "winter" and winter:
+        chronic_ids = winter[:args.episodes]
+    else:
+        chronic_ids = list(range(args.episodes))
+    used_months = sorted({months[i] for i in chronic_ids if months[i]})
+    print(f"\nchronics: {len(names)} available, "
+          f"{len(summer)} summer / {len(winter)} winter")
+    print(f"season={args.season}  ids={chronic_ids}  months={used_months}")
+    if args.season == "winter":
+        print("  NOTE: winter is the PLACEBO arm -- derating clips to 1.0, so")
+        print("        every sigma should look identical here.  That is the point.")
     print(f"\nrolling {args.episodes} episodes per sigma, "
-          f"max {args.max_steps} steps, chronics pinned to {chronic_ids} ...")
+          f"max {args.max_steps} steps ...")
     rows = []
     for s in args.sigmas:
         print(f"\n  {dlr.describe(s)}")

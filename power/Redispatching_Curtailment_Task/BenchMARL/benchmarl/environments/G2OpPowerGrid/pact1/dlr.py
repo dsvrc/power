@@ -93,20 +93,41 @@ def driver_level(month, hour, sigma=1.0):
     return float(np.clip((t - lo) / (hi - lo), 0.0, 1.0))
 
 
-def ampacity_ratio(month, hour, sigma=1.0):
+def ampacity_ratio(month, hour, sigma=1.0, derate_only=True):
     """limit(t) / limit_static, from the IEEE 738 convective-cooling relation.
 
         I(T_amb) / I(T_ref) = sqrt( (T_max - T_amb) / (T_max - T_ref) )
 
     At sigma = 0 this is exactly 1.0 -- the identity that makes the stock task
     recoverable byte for byte, and which the self-check asserts.
+
+    DERATE-ONLY, and this is a substantive choice, not a detail.
+    -----------------------------------------------------------
+    The raw relation both derates in heat and UPRATES in cold, and sigma scales
+    both.  That makes sigma a realism dial whose difficulty depends on season,
+    not a severity dial: measured on winter chronics, raising sigma to 2.0
+    applied x1.269 to every limit and made the task strictly EASIER (reference
+    survival 350 -> 901 steps, rho 0.905 -> 0.784).
+
+    Clipping at 1.0 keeps only the derating half:
+
+      * it is the conservative choice -- the grid is never credited with more
+        capacity than its own published static rating, so no headroom is
+        invented anywhere;
+      * it makes sigma monotone in difficulty, which a severity dial must be;
+      * it is what a cautious operator does, since static ratings are the
+        contractual limit and DLR uprating requires extra instrumentation
+        before it may be relied on.
+
+    Pass derate_only=False only to inspect the raw two-sided physics.
     """
     if sigma == 0.0:
         return 1.0
     t_amb = ambient_temp(month, hour, sigma=sigma)
     # Keep the conductor headroom positive even under absurd sigma.
     headroom = max(T_CONDUCTOR_MAX - float(t_amb), 1.0)
-    return float(np.sqrt(headroom / (T_CONDUCTOR_MAX - T_RATING_REF)))
+    r = float(np.sqrt(headroom / (T_CONDUCTOR_MAX - T_RATING_REF)))
+    return min(1.0, r) if derate_only else r
 
 
 def describe(sigma):
@@ -121,4 +142,16 @@ def describe(sigma):
     tag = "REALISTIC (IEEE 738, Ile-de-France)" if abs(sigma - 1.0) < 1e-9 \
         else "BEYOND-PHYSICAL stress test" if sigma > 1.0 else "sub-realistic"
     return (f"severity {sigma:.2f} -> ambient {t_cold:+.1f}..{t_hot:+.1f} degC, "
-            f"ampacity x{hot:.3f}..x{cold:.3f}   [{tag}]")
+            f"ampacity x{hot:.3f} (summer peak) .. x{cold:.3f} (winter, clipped "
+            f"at the static rating)   [{tag}]")
+
+
+def is_thermally_active(month, sigma=1.0, threshold=0.99):
+    """Does derating bite in this month at all?
+
+    Winter months clip to exactly 1.0, so they are a natural PLACEBO condition:
+    the dial is configured and running, and provably does nothing.  Reporting a
+    winter sweep alongside the summer one is the cheapest available control
+    against "your severity knob is doing something you have not described".
+    """
+    return ampacity_ratio(month, PEAK_HOUR, sigma) < threshold
