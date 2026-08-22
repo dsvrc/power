@@ -69,6 +69,11 @@ def cli():
                                 PACT-1 estimator/compensator wrapped around the env, so
                                 the two share host hyperparameters exactly and 'MAPPO'
                                 is the matched blind arm. (default: MAPPO)""")
+    parser.add_argument('--serial', action='store_true',
+                        help="""Disable parallel collection. Slow, but worker
+                                exceptions surface as real tracebacks instead of
+                                EOFError from a closed pipe. Use this first when a
+                                run dies during collector setup.""")
     parser.add_argument('--chronics', type=str, default=None,
                         help="""Chronics season. Presets: 'summer' (.*-0[678]-.*$,
                                 where thermal derating bites), 'winter'
@@ -265,7 +270,10 @@ if __name__ == "__main__":
 
     experiment_config.max_n_frames = n_frames
 
-    experiment_config.parallel_collection = IS_LINUX
+    experiment_config.parallel_collection = IS_LINUX and not args.serial
+    if args.serial:
+        print("[parallelism] SERIAL collection: worker exceptions will surface "
+              "as real tracebacks instead of EOFError.")
 
     if alg in ("MAPPO", "PACT1"):
         experiment_config.on_policy_n_envs_per_worker = n_envs
