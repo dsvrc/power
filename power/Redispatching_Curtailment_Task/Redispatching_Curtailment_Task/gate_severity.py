@@ -376,6 +376,7 @@ def main():
                 "G4a+" if g4a_ok else "G4a-",
                 "G4b+" if g4b_ok else "G4b-",
                 "G5+" if g5 else "G5-"]
+        r["passes"] = bool(r["sigma"] > 0 and hurt and g5 and (g4a_ok or g4b_ok))
         if r["sigma"] > 0 and hurt and g5:
             if g4a_ok and rec_strict is None:
                 rec_strict = r["sigma"]
@@ -402,9 +403,48 @@ def main():
     print("   means throughput-limited and no method can recover (3.1)")
     print("G5 the grid must run nearer its limits: the peer term scales as")
     print("   1/limit(t), so this is where dormant coupling wakes up")
+    # ---- the placebo arm reports differently ----------------------------
+    if args.season == "winter":
+        identical = all(
+            abs(r["len_b"] - base["len_b"]) < 1e-6
+            and abs(r["len_p"] - base["len_p"]) < 1e-6 for r in rows)
+        print("\n" + "=" * 78)
+        print("  WINTER PLACEBO ARM")
+        if identical:
+            print("  PASS: every sigma is byte-identical. The dial is configured,")
+            print("  running, and provably inert where the physics says it should")
+            print("  be. 'No sigma passes' here is the INTENDED result, not a")
+            print("  failure -- it is the control that shows the knob is not")
+            print("  doing anything undisclosed.")
+        else:
+            print("  FAIL: rows differ across sigma. Derating must clip to")
+            print("  exactly 1.0 in winter; something else is varying and the")
+            print("  summer sweep cannot be attributed to the dial.")
+        print("=" * 78)
+        return
+
     print("\n" + "=" * 78)
-    if rec_strict is not None:
-        tag = "REALISTIC" if abs(rec_strict - 1.0) < 1e-9 else "see label above"
+    # sigma = 1.0 is not selected FROM the sweep -- it is fixed in advance by
+    # the climate, and the sweep's job is to verify that reality yields a
+    # usable task.  Preferring it when it passes is therefore not tuning; the
+    # other rows are sensitivity analysis around a pre-committed anchor.
+    anchor = next((r for r in rows if abs(r["sigma"] - 1.0) < 1e-9), None)
+    if anchor is not None and anchor.get("passes"):
+        best = max((r for r in rows if r.get("passes")),
+                   key=lambda r: r["gap_lo"], default=None)
+        print("  RECOMMENDED sigma = 1.00   (REALISTIC, IEEE 738)")
+        print("  Not chosen from this sweep: sigma=1 is fixed in advance by the")
+        print("  grid's own measured annual temperature range. The sweep only")
+        print("  verifies that physical reality yields a usable task, and it")
+        print(f"  does: reference survival {100*(anchor['len_b']/base['len_b']-1):+.1f}%, "
+              f"coordination gap {anchor['len_p']/anchor['len_b']:.2f} "
+              f"CI[{anchor['gap_lo']:.2f},{anchor['gap_hi']:.2f}].")
+        if best is not None and abs(best["sigma"] - 1.0) > 1e-9:
+            print(f"  (Largest gap in the sweep is at sigma={best['sigma']:.2f}; "
+                  f"report the full sweep, headline sigma=1.)")
+        print("  Other passing sigmas are sensitivity analysis, not candidates.")
+    elif rec_strict is not None:
+        tag = "REALISTIC" if abs(rec_strict - 1.0) < 1e-9 else "sub-realistic"
         print(f"  RECOMMENDED sigma = {rec_strict:.2f}   ({tag})   [strict: G3+G4a+G5]")
         print("  Capacity is preserved AND a coordination gap exists: the")
         print("  cleanest case, and 3.1 holds in its literal form.")

@@ -8,14 +8,22 @@ experiment:
 
 task:
   config:
-    regex_filter_chronics: ".*-02-.*$"
+    # Chronics season. Thermal derating is a SUMMER phenomenon: the IEEE 738
+    # ampacity ratio clips to exactly 1.000 in December-February, so a severity
+    # sweep run on winter chronics measures nothing at all. Measured by
+    # gate_severity.py --season winter: all five sigma rows byte-identical
+    # (reference 305.8 steps, privileged 441.5, rho200 0.914).
+    #
+    #   summer  ".*-0[678]-.*$"      June-August, where derating bites
+    #   winter  ".*-(12|01|02)-.*$"  placebo arm: dial configured but inert
+    #   feb     ".*-02-.*$"          the previous default (a winter subset)
+    #
+    # Override per run with --chronics rather than editing this file, so the
+    # summer and winter arms differ only by a flag on the command line.
+    regex_filter_chronics: ".*-0[678]-.*$"
 
 algorithm: {}
 
 model: {}
 
 critic_model: {}
-
-
-
-

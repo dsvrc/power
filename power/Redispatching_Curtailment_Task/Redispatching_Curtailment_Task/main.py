@@ -69,6 +69,16 @@ def cli():
                                 PACT-1 estimator/compensator wrapped around the env, so
                                 the two share host hyperparameters exactly and 'MAPPO'
                                 is the matched blind arm. (default: MAPPO)""")
+    parser.add_argument('--chronics', type=str, default=None,
+                        help="""Chronics season. Presets: 'summer' (.*-0[678]-.*$,
+                                where thermal derating bites), 'winter'
+                                (.*-(12|01|02)-.*$, the placebo arm where the
+                                ampacity ratio clips to exactly 1.000), 'feb'
+                                (.*-02-.*$), 'all' (no filter). Anything else is
+                                used as a raw regex. Overrides
+                                configs/expes_config.yaml so the summer and winter
+                                arms differ only by this flag. (default: use the
+                                config file)""")
     parser.add_argument('--severity', type=float, default=0.0,
                         help="""Dynamic-line-rating severity. TASK physics: applied
                                 identically to MAPPO, MASAC and PACT1. 0 = static
@@ -232,6 +242,22 @@ if __name__ == "__main__":
             else:
                 setattr(config, hp, new_hps[hp])
 
+
+    # Chronics season. Applied AFTER the yaml merge above, which does
+    # config.config.update(...) and would otherwise silently overwrite it --
+    # the run would then report one season on the command line and train on
+    # another. Task physics, so it applies to every algorithm alike.
+    CHRONICS_PRESETS = {
+        "summer": r".*-0[678]-.*$",        # Jun-Aug: derating is active
+        "winter": r".*-(12|01|02)-.*$",    # Dec-Feb: ampacity clips to 1.000
+        "feb": r".*-02-.*$",               # the previous default
+        "all": None,
+    }
+    if args.chronics is not None:
+        task.config["regex_filter_chronics"] = CHRONICS_PRESETS.get(
+            args.chronics, args.chronics)
+    print(f"[task] severity={args.severity}  "
+          f"chronics={task.config.get('regex_filter_chronics')!r}")
 
     experiment_config.save_folder = os.path.join(ROOT_DIR, "saved_models")
     os.makedirs(experiment_config.save_folder, exist_ok=True)
