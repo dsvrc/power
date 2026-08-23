@@ -23,9 +23,15 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
     same calls in the same order.
     """
 
-    def __init__(self, severity=0.0, dlr_update_every=1, **kwargs):
+    def __init__(self, severity=0.0, dlr_update_every=6, **kwargs):
         super().__init__(**kwargs)
         self.severity = float(severity)
+        # Ambient temperature moves on the scale of hours; grid2op steps are 5
+        # minutes, so re-rating every step costs 6x more set_thermal_limit
+        # calls than the physics justifies.  Measured in July at sigma=1, the
+        # ratio moves at most 1.69% per hour (0.8335 at 13:00 -> 0.8247 at
+        # 15:00), so a 30-minute interval costs under ~0.9% of the ratio
+        # against an 18% derating being studied.  6 steps = 30 minutes.
         self._dlr_every = max(1, int(dlr_update_every))
         self._base_limits = None
         self._dlr_step = 0
