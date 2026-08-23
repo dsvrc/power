@@ -69,6 +69,17 @@ def cli():
                                 PACT-1 estimator/compensator wrapped around the env, so
                                 the two share host hyperparameters exactly and 'MAPPO'
                                 is the matched blind arm. (default: MAPPO)""")
+    parser.add_argument('--safe_max_rho', type=float, default=None,
+                        help="""Loading below which the built-in heuristic plays
+                                do-nothing instead of consulting the agents. TASK
+                                physics: identical for every algorithm. At the
+                                shipped 0.9 on July chronics the agents are asked
+                                to act on only 13%% of steps (7.5 grid2op steps per
+                                decision), so the benchmark mostly measures the
+                                heuristic and costs 3x the compute to do it.
+                                Lowering it hands control to the agents earlier.
+                                Measure with probe_safe_rho.py, freeze, and use the
+                                SAME value for all arms. (default: config value)""")
     parser.add_argument('--serial', action='store_true',
                         help="""Disable parallel collection. Slow, but worker
                                 exceptions surface as real tracebacks instead of
@@ -273,8 +284,11 @@ if __name__ == "__main__":
     if args.chronics is not None:
         task.config["regex_filter_chronics"] = CHRONICS_PRESETS.get(
             args.chronics, args.chronics)
+    if args.safe_max_rho is not None:
+        task.config["safe_max_rho"] = args.safe_max_rho
     print(f"[task] severity={args.severity}  "
-          f"chronics={task.config.get('regex_filter_chronics')!r}")
+          f"chronics={task.config.get('regex_filter_chronics')!r}  "
+          f"safe_max_rho={task.config.get('safe_max_rho')}")
 
     experiment_config.save_folder = os.path.join(ROOT_DIR, "saved_models")
     os.makedirs(experiment_config.save_folder, exist_ok=True)
