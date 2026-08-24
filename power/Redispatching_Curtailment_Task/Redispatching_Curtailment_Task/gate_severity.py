@@ -49,6 +49,17 @@ ENV = os.path.join(G2OP_ENV_DIR, "l2rpn_idf_2023")
 ZONES = [f"Zone{i}" for i in range(11)]
 
 
+def safe_set_limit(env, limits):
+    """set_thermal_limit, guarded.  grid2op refuses on an uninitialised or
+    game-over environment; this file's calls all go through here so no caller
+    has to remember which states are legal."""
+    try:
+        env.set_thermal_limit(limits)
+        return True
+    except Exception:                                         # noqa: BLE001
+        return False
+
+
 def make_env():
     try:
         from lightsim2grid import LightSimBackend
@@ -164,7 +175,7 @@ def roll(env, base_limits, sigma, n_episodes, privileged, ptdf, curtail_ids,
                 pass
         obs = env.reset()
         if sigma > 0:
-            env.set_thermal_limit(base_limits * dlr.ampacity_ratio(
+            safe_set_limit(env, base_limits * dlr.ampacity_ratio(
                 obs.month, obs.hour_of_day, sigma))
         done, steps = False, 0
         while not done and steps < max_steps:
@@ -189,7 +200,7 @@ def roll(env, base_limits, sigma, n_episodes, privileged, ptdf, curtail_ids,
             # Only touch limits on a live environment: after a game over
             # grid2op refuses, and that is what crashed the first version.
             if sigma > 0 and not done:
-                env.set_thermal_limit(base_limits * dlr.ampacity_ratio(
+                safe_set_limit(env, base_limits * dlr.ampacity_ratio(
                     obs.month, obs.hour_of_day, sigma))
         lens.append(steps)
     # Per-episode lengths are returned, not just their mean: the gap statistic
@@ -256,7 +267,7 @@ def main():
     # uprate of x1.269, and reported the dial as working while it was making
     # the grid easier.
     ratio = dlr.ampacity_ratio(dlr.PEAK_MONTH, dlr.PEAK_HOUR, 2.0)
-    env.set_thermal_limit(base_limits * ratio)
+    safe_set_limit(env, base_limits * ratio)
     obs2, _, _, _ = env.step(env.action_space({}))
     applied = np.asarray(env.get_thermal_limit(), dtype=np.float64)
     took = np.allclose(applied, base_limits * ratio, rtol=1e-6)
@@ -266,7 +277,7 @@ def main():
           f"(expect roughly x{1/ratio:.2f} if the dial is live)")
     if not took or ratio >= 1.0:
         print("  !! dial not derating; every gate below is noise. STOP.")
-    env.set_thermal_limit(base_limits)
+    safe_set_limit(env, base_limits)
 
     # ---- pick chronics from the season where derating exists -------------
     # Thermal stress is a summer phenomenon.  Winter chronics clip to a ratio

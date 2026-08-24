@@ -77,6 +77,21 @@ ZONES = [f"Zone{i}" for i in range(11)]
 PRESETS = {"summer": r".*-07-.*$", "winter": r".*-02-.*$"}
 
 
+def safe_set_limit(env, limits):
+    """set_thermal_limit, guarded.
+
+    grid2op refuses the call whenever the environment is not initialised --
+    freshly built, or sitting on a game over -- and raises.  This has now bitten
+    three separate scripts, so every call in this file goes through here rather
+    than relying on the caller to remember which states are legal.
+    """
+    try:
+        env.set_thermal_limit(limits)
+        return True
+    except Exception:                                         # noqa: BLE001
+        return False
+
+
 def make_env(regex):
     try:
         from lightsim2grid import LightSimBackend
@@ -185,7 +200,7 @@ def main():
         for ep in range(args.episodes):
             env.set_id(ep)
             obs = env.reset()
-            env.set_thermal_limit(base * dlr.ampacity_ratio(
+            safe_set_limit(env, base * dlr.ampacity_ratio(
                 obs.month, obs.hour_of_day, s))
             done, steps = False, 0
             while not done and steps < args.max_steps:
@@ -199,9 +214,12 @@ def main():
                 obs, _, done, _ = env.step(env.action_space({}))
                 steps += 1
                 if not done:
-                    env.set_thermal_limit(base * dlr.ampacity_ratio(
+                    safe_set_limit(env, base * dlr.ampacity_ratio(
                         obs.month, obs.hour_of_day, s))
-            env.set_thermal_limit(base)
+            # Restoring here is best-effort: after a game over grid2op refuses,
+            # and it does not matter because the next episode resets first and
+            # re-applies the ratio from a clean state.
+            safe_set_limit(env, base)
         if not n:
             print(f"{s:6.2f}  no derating-induced excess observed")
             continue
