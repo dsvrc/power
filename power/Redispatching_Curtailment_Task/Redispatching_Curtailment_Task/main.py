@@ -21,6 +21,30 @@ from utils import ROOT_DIR, G2OP_ENV_DIR, IS_LINUX
 from BMMAAgent import BMMAAgent
 from evaluate import evaluate
 
+def _check_benchmarl_checkout():
+    """Fail loudly if benchmarl resolves to a DIFFERENT clone than this file.
+
+    An editable install records an absolute path.  With two checkouts on a
+    machine it is easy for `import benchmarl` to land in the stale one, and the
+    symptom is bizarre: main.py passes a new argument and a months-old
+    common.py rejects it as unexpected.  Cheap to detect, expensive to debug.
+    """
+    import benchmarl
+    here = os.path.dirname(os.path.abspath(__file__))
+    expected = os.path.abspath(os.path.join(here, os.pardir, "BenchMARL"))
+    actual = os.path.abspath(os.path.dirname(os.path.dirname(benchmarl.__file__)))
+    if os.path.exists(expected) and actual != expected:
+        print("=" * 78)
+        print("  WARNING: benchmarl is NOT the checkout next to this script.")
+        print(f"    this script : {here}")
+        print(f"    expected    : {expected}")
+        print(f"    actually    : {actual}")
+        print("  Edits to pact1/, common.py or my_power_grid.py will be IGNORED.")
+        print("  Fix with:")
+        print(f"    cd {expected} && pip install -e . --no-deps")
+        print("=" * 78)
+
+
 def available_cpus():
     """Cores actually allocated to this process (respects the SLURM/cgroup cpuset)."""
     if hasattr(os, "sched_getaffinity"):
@@ -106,8 +130,9 @@ def cli():
                         help="""PACT-1 trust prior. Initialise NEAR the optimum and let
                                 the policy pull it down -- a hedged 0.5 measured ~1800
                                 return worse on Ant with a correct waveform. (default: 0.90)""")
-    parser.add_argument('--pact1_gate', type=str, default="prediction",
-                        choices=["prediction", "prediction_only", "trace", "none"],
+    parser.add_argument('--pact1_gate', type=str, default="binary",
+                        choices=["binary", "prediction", "prediction_only",
+                                 "trace", "none"],
                         help="""Confidence gate. 'prediction' (default) = prediction gate
                                 x divisor gate x readiness. 'trace' is the known-bad gate,
                                 kept runnable as an ablation. (default: prediction)""")
@@ -184,6 +209,8 @@ if __name__ == "__main__":
     if IS_LINUX:
         import multiprocessing as mp
         mp.set_start_method("fork", force=True)
+
+    _check_benchmarl_checkout()
 
     args = cli()
     # Explicit, not positional: unpacking vars(args).values() silently

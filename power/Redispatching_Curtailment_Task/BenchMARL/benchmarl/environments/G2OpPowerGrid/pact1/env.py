@@ -309,7 +309,38 @@ class PACT1Env(PZMAEnvDLR):
             delta = 0.0
             if psi is not None:
                 est = self.est[agent]
-                if self.gate_kind == "prediction":
+                if self.gate_kind == "binary":
+                    # SEPARATION OF CONCERNS, and it is a theory point.
+                    #
+                    # RLS returns the least-squares prediction of the peer
+                    # term.  For a least-squares predictor the gain that
+                    # minimises post-compensation residual variance is
+                    #     g* = Cov(ell_hat, ell_true) / Var(ell_hat) = 1
+                    # exactly, because the LS prediction already IS the
+                    # conditional mean.  T4 (III.8) pulls g* below 1, since
+                    # compensating feeds the medium being compensated against,
+                    # and III.9 pulls it further below under estimation noise --
+                    # but to an interior optimum, not to nothing.
+                    #
+                    # Multiplying three heuristic confidences produced
+                    # applied_trust = 0.024 against fit_gain = 0.016, i.e. ~40x
+                    # below the theoretical gain.  That is not conservatism, it
+                    # is throwing the estimate away.
+                    #
+                    # So the gates decide WHETHER the estimate is admissible --
+                    # does it beat the null model (III.11), is the divisor
+                    # significant -- and the T4-calibrated constant decides HOW
+                    # MUCH.  This also matches III.5's own finding that constant
+                    # trust is the robust win and learned modulation is the open
+                    # frontier.
+                    c_pred = est.confidence_at(psi)
+                    c_div = est.divisor_confidence(1)
+                    admissible = (est.fit_confidence(floor=self.fit_floor) > 0.0
+                                  and est.ready_confidence() >= 1.0)
+                    self._gate_parts[agent] = (c_pred, c_div,
+                                               1.0 if admissible else 0.0)
+                    conf = (self.max_trust / self.trust_init) if admissible else 0.0
+                elif self.gate_kind == "prediction":
                     # Numerator gate (III.5) x divisor gate: the inverse is a
                     # ratio, and each half needs its own confidence.
                     c_pred = est.confidence_at(psi)
