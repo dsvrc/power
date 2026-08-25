@@ -28,6 +28,7 @@ COLUMNS = [
     # not a compensation, and it is invisible in every other column.
     "analytic_frac",              # share of steps using the PTDF divisor
     "dlr_ratio", "dlr_skip",      # severity liveness: is the dial reaching physics?
+    "ff_abs",                     # analytic derating feedforward (local term)
     "delta_abs", "delta_clip_frac", "delta_nonzero_frac",
     "trP", "clamp_frac",          # covariance windup: tr(P) and how often bounded
     "state",                      # INERT / ASLEEP / ALIVE

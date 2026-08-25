@@ -144,6 +144,14 @@ def cli():
                                 (II.3): sweep it, report the sweep, calibrate on one
                                 seed and validate on held-out seeds. (default: 1.0,
                                 i.e. uncapped)""")
+    parser.add_argument('--pact1_ff_gain', type=float, default=1.0,
+                        help="""Gain on the analytic derating feedforward, which
+                                cancels the KNOWN excess loading rho*(1-r) using
+                                the PTDF self-sensitivity. Closed form, no
+                                estimation, so 1.0 is the exact inverse. Set 0 to
+                                disable and recover peer-only compensation (the
+                                ablation that isolates the coordination term).
+                                (default: 1.0)""")
     parser.add_argument('--pact1_sensor', type=str, default="max",
                         choices=["mean", "max"],
                         help="""Own-harm sensor: mean or max rho over the zone's own
@@ -266,6 +274,7 @@ if __name__ == "__main__":
             "gate": args.pact1_gate,
             "sensor": args.pact1_sensor,
             "max_trust": args.pact1_max_trust,
+            "ff_gain": args.pact1_ff_gain,
             "log": os.path.join(ROOT_DIR, args.pact1_log),
         }
     

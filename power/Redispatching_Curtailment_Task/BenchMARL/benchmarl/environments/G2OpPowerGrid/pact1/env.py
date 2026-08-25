@@ -69,6 +69,8 @@ class PACT1Env(PZMAEnvDLR):
                  pact1_min_t=3.0,           # min |coef|/se on the divisor
                  pact1_analytic_sens=True,  # divisor from PTDF, not from RLS
                  pact1_max_trust=1.0,       # Phase-1 calibrated gain cap (II.3)
+                 pact1_dlr_feedforward=True,  # analytic own-term compensation
+                 pact1_ff_gain=1.0,         # feedforward gain; 1.0 = exact inverse
                  pact1_log=None,
                  pact1_log_every=200,
                  pact1_matched_band=(0.69, 0.70),
@@ -83,6 +85,9 @@ class PACT1Env(PZMAEnvDLR):
         self.sensor_kind = str(pact1_sensor)
         self.fit_floor = float(pact1_fit_floor)
         self.min_t = float(pact1_min_t)
+        self.dlr_feedforward = bool(pact1_dlr_feedforward)
+        self.ff_gain = float(pact1_ff_gain)
+        self._ff_hist = []
         self.use_analytic_sens = bool(pact1_analytic_sens)
         # THE GAIN CAP -- T4 (III.8), not a convenience knob.
         #
@@ -398,6 +403,46 @@ class PACT1Env(PZMAEnvDLR):
                                        and delta != 0.0)
             self._delta_n += 1
 
+            # ---- ANALYTIC DERATING FEEDFORWARD --------------------------
+            # The peer compensator above addresses Delta_peer, measured at
+            # 9.5% of the derating excess at sigma=1.  The other 76.9%
+            # (Delta_own) is the amplification of the agent's OWN injections
+            # by the shrunken limit, and it is left entirely to the policy to
+            # rediscover by gradient descent -- which is why return sat at 237
+            # against a ~72% recoverable ceiling.
+            #
+            # It does not have to be learned.  Loading is rho = f/(L r), so
+            # the sigma=0 counterfactual is rho*r and the excess is
+            #     excess = rho * (1 - r)
+            # with r a function of month and hour, both already in the
+            # observation, and d(rho)/d(a) from the same PTDF the basis uses.
+            # The correction is therefore CLOSED FORM: no estimator, no gate,
+            # no confidence, nothing to converge.
+            #
+            # This is a LOCAL term -- it needs no peer information -- so it is
+            # reported separately from the peer compensation and must also be
+            # given to the information-matched baseline.  Delta_peer remains
+            # the part that only coordination can reach.
+            delta_ff = 0.0
+            if (self.dlr_feedforward and self.severity > 0.0
+                    and self._last_g2op_obs is not None):
+                r = float(getattr(self, "_last_ratio", 1.0))
+                if r < 1.0 - 1e-9:
+                    drho_da_ff = None
+                    if self.use_analytic_sens:
+                        drho_da_ff = self._analytic_sensitivity(
+                            z, self._last_g2op_obs)
+                    if drho_da_ff is not None and abs(drho_da_ff) >= \
+                            self.own_gain_floor:
+                        rho_now = self._sensor(self._last_g2op_obs, z)
+                        excess = rho_now * (1.0 - r)
+                        delta_ff = float(np.clip(
+                            -self.ff_gain * excess / drho_da_ff,
+                            -self.max_delta, self.max_delta))
+            self._ff_hist.append(abs(delta_ff))
+            delta = float(np.clip(delta + delta_ff,
+                                  -self.max_delta, self.max_delta))
+
             new_curt, n_sat = apply_inverse(curt, delta)
             self._sat_hits += n_sat
             self._sat_total += int(new_curt.size)
@@ -515,6 +560,11 @@ class PACT1Env(PZMAEnvDLR):
                 getattr(self, "_dlr_skipped", 0),
                 getattr(self, "_dlr_skipped", 0)
                 + getattr(self, "_dlr_applied", 0)),
+            # Separated on purpose: ff_abs is the LOCAL analytic term (any
+            # method with the domain model can have it), delta_abs is the
+            # total. delta_abs - ff_abs is the coordination contribution.
+            "ff_abs": (float(np.mean(self._ff_hist[-4000:]))
+                       if self._ff_hist else np.nan),
             "delta_abs": (float(np.mean(self._delta_hist[-4000:]))
                           if self._delta_hist else np.nan),
             "delta_clip_frac": diag.safe_ratio(self._delta_clipped,
