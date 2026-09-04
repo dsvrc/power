@@ -55,6 +55,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import numpy as np                                            # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# NOTE: this directory is deliberately NOT added to sys.path -- see phase_a.
 ENV_DIR = os.path.join(os.path.dirname(HERE), "BenchMARL", "benchmarl",
                        "environments", "G2OpPowerGrid")
 
@@ -161,12 +162,9 @@ def _git_rev():
 def _make_env(args, zones_file, zone_names, g2op_env_dir):
     """Build the same env class the training run builds.
 
-    `g2op_env_dir` is passed in rather than imported here on purpose: phase_a
-    puts the G2OpPowerGrid directory on sys.path so `pact1.*` resolves, and that
-    directory contains its OWN utils.py (the zone helpers). A later
-    `from utils import ...` then binds to the wrong module. gate_severity.py and
-    theory_*.py dodge this by importing the task-level utils BEFORE the insert;
-    phase_a now does the same and hands the value down.
+    `g2op_env_dir` is passed in rather than imported here because the
+    G2OpPowerGrid directory has its own utils.py (the zone helpers) and the task
+    directory has a different one; whichever is on sys.path first wins.
     """
     CHRONICS = {
         "summer": r".*-07-.*$", "winter": r".*-02-.*$",
@@ -181,23 +179,34 @@ def _make_env(args, zones_file, zone_names, g2op_env_dir):
         regex_filter_chronics=CHRONICS.get(args.chronics, args.chronics),
         safe_max_rho=float(args.safe_max_rho), curtail_margin=30,
     )
-    from pact1.dlr_env import PZMAEnvDLR                      # noqa: PLC0415
+    # Full package path, not a top-level `pact1.*`: dlr_env.py does
+    # `from ..PZMAEnvWithHeuristics import ...`, which only resolves when pact1
+    # is a subpackage of benchmarl.environments.G2OpPowerGrid.
+    from benchmarl.environments.G2OpPowerGrid.pact1.dlr_env import (  # noqa: PLC0415,E501
+        PZMAEnvDLR)
     return PZMAEnvDLR(severity=float(args.severity),
                       dlr_spatial=(args.dlr_spatial == "true"), **cfg)
 
 
 def phase_a(args):
     """Everything determinable without a policy, a reward or a return."""
-    # ORDER MATTERS. The task directory and ENV_DIR both contain a utils.py,
-    # and they are different modules. Bind the task-level one FIRST, so it is
-    # in sys.modules before ENV_DIR joins sys.path; everything after this line
-    # that says `utils` then still means the right file.
+    # Everything from pact1 is imported by its FULL package path, and
+    # G2OpPowerGrid is deliberately NOT put on sys.path. Two reasons:
+    #
+    #   1. dlr_env.py and env.py use `from ..X import Y`, which fails outright
+    #      as a top-level `pact1.*` ("attempted relative import beyond
+    #      top-level package").
+    #   2. Importing the same file under two names creates two module objects
+    #      with two sets of module state -- basis._ZONES_CACHE among them --
+    #      so a partition swap could be visible to one and not the other.
+    #
+    # gate_severity.py and theory_*.py get away with the top-level spelling
+    # only because they touch basis.py and dlr.py, neither of which has a `..`.
     from utils import G2OP_ENV_DIR                            # noqa: PLC0415
-    sys.path.insert(0, ENV_DIR)
     from make_zones import select_partition                   # noqa: PLC0415
-    from pact1.basis import (CouplingBasis, get_ptdf,         # noqa: PLC0415
-                             gram_cond, ptdf_zone_coupling)
-    from pact1 import dlr                                     # noqa: PLC0415
+    from benchmarl.environments.G2OpPowerGrid.pact1.basis import (  # noqa: PLC0415,E501
+        CouplingBasis, get_ptdf, gram_cond, ptdf_zone_coupling)
+    from benchmarl.environments.G2OpPowerGrid.pact1 import dlr  # noqa: PLC0415
 
     out = {}
     zones_file, zone_names = select_partition(args.n_zones)
