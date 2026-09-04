@@ -160,25 +160,66 @@ revisions have already invalidated earlier runs.
 
 ---
 
+## 4b. Preflight — measure the task, then calibrate on held-out seeds
+
+```bash
+python preflight.py --n_zones 22 --severity 1.0 --chronics summer --safe_max_rho 0.7 --dlr_spatial false --calibrate --calib-seeds 100 101 --eval-seeds 0 1 2 3 4 --emit-commands
+```
+
+Phase A measures things that have **no return in them**: the channel count `r`
+chosen by conditioning under the basis's own reference distribution, which
+agents have no live coupling, whether Φ varies, whether the dial is live, and
+steps-per-decision. Phase B sweeps `max_trust` on seeds **disjoint from the
+evaluation set** and keeps the whole table — the inverted-U is the T4 evidence,
+so the sweep is the deliverable and the argmax is a by-product.
+
+Both guards are enforced in code: `main.py --preflight` refuses a manifest
+measured on a different task, and refuses to evaluate on any seed the manifest
+was calibrated on. Commit the manifest before the evaluation runs.
+
+`--emit-commands` writes `*_campaign.sh` with all four arms wired to it.
+
+### Why `r` is worth choosing rather than defaulting
+
+The `r=1` default was measured **at N=11** (r=2 conditioned worse: 3006 vs
+810). That does not transfer: with one lumped channel, `psi_i` is a W-weighted
+mean over peers, so averaging 21 peers instead of 10 concentrates it toward a
+constant and drifts into collinearity with the intercept. Phase A measures the
+conditioning at the N you are actually running.
+
+### `cond_psi` is blind at N=22 unless you fix the representative
+
+`env.py:503` samples the conditioning diagnostic from **agent index 0 only**.
+Agents are ordered lexicographically, so index 0 is `Zone0` — which at N=22 has
+zero curtailable generators. Its Φ is identically zero, so `own_col` is a
+constant, exactly collinear with the intercept, so `gram_cond` returns `inf` on
+every row **by construction**. Measured on `pact_N22_s1.csv`: `inf` in 1548 of
+1548 rows. Phase A reports which agent to use instead (`blind.cond_agent`).
+
 ## 5. The paired head-to-head
 
 Per seed in `{0,1,2,3,4}`, two runs differing **only** in `--alg`:
 
-```bash
-N=22
-for s in 0 1 2 3 4; do
-  python main.py --n_frames 2_000_000 --lr 3e-5 --MAPPO_n_episode 30 \
-    --seeds $s --chronics summer --safe_max_rho 0.7 --n_zones $N \
-    --dlr_spatial false --severity 1.0 \
-    --pact1_gate binary --pact1_max_trust 0.5 --alg MAPPO
+Use the script `preflight.py --emit-commands` wrote, or equivalently:
 
-  python main.py --n_frames 2_000_000 --lr 3e-5 --MAPPO_n_episode 30 \
-    --seeds $s --chronics summer --safe_max_rho 0.7 --n_zones $N \
-    --dlr_spatial false --severity 1.0 \
-    --pact1_gate binary --pact1_max_trust 0.5 --alg PACT1 \
-    --pact1_log pact_N${N}_s${s}.csv
+```bash
+MF=preflight_N22_sev1_summer.json
+for s in 0 1 2 3 4; do
+  python main.py --preflight $MF --n_frames 2_000_000 --seeds $s --alg MAPPO
+  python main.py --preflight $MF --n_frames 2_000_000 --seeds $s --alg PACT1 --pact1_log pact_N22_s${s}.csv
 done
 ```
+
+The manifest carries `n_zones`, `severity`, `chronics`, `safe_max_rho`,
+`dlr_spatial`, `r` and `max_trust`, so the two arms cannot drift apart and
+neither can silently run at a setting nobody chose.
+
+**Do not put `--pact1_*` on the MAPPO line.** The `pact1` block is only built
+when `--alg PACT1`, so those flags were always inert there -- but writing them
+makes the baseline look configured with a method hyperparameter, and it hides
+the trap that `--alg MAPPO --pact1_ff_gain 1.0` silently yields a blind arm
+rather than the information-matched baseline. `main.py` now refuses the
+combination and prints the correct spelling.
 
 ### `--dlr_spatial false` is not optional for an N sweep
 
@@ -211,8 +252,8 @@ learning curve that beats baselines while the method is off.
 
 | arm | flag | isolates |
 |---|---|---|
-| **peer-only** | `--pact1_ff_gain 0` | **run this first.** The feedforward is 79% of the correction and is a *local* term. If peer-only ties MAPPO, the coordination claim on this environment is thin and the paper should lead with whichever of URB/Ant/SMAC/VMAS has the largest PEER fraction. It decides the framing |
-| information-matched baseline | MAPPO + the same analytic feedforward | **mandatory.** Without it the gap is information, not mechanism |
+| **peer-only** | `--alg PACT1 --pact1_ff_gain 0` | **run this first.** The feedforward is 79% of the correction at N=11 and 86% at N=22, and it is a *local* term. If peer-only ties MAPPO, the coordination claim on this environment is thin and the paper should lead with whichever of URB/Ant/SMAC/VMAS has the largest PEER fraction. It decides the framing |
+| information-matched baseline | `--alg PACT1 --pact1_max_trust 0.0 --pact1_ff_gain 1.0` | **mandatory.** `max_trust 0` makes the gate return `g=0` every step, so the peer term is exactly zero and only the local analytic feedforward remains. Note it is **not** `--alg MAPPO --pact1_ff_gain 1.0`: the pact1 block is only built for `--alg PACT1`, so that spelling silently produces a blind arm. `main.py` now refuses it |
 | T4 inverted-U | `--pact1_max_trust` sweep | the sweep *is* the evidence, not tuning. Calibrate on one seed, validate on held-out seeds |
 | scaling law | `--n_zones` sweep at fixed σ | the prediction |
 | trivial ablation | recurrent host + raw peer actions in obs | if it matches PACT, the estimator is decoration |

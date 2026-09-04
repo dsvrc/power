@@ -58,6 +58,8 @@ def _preparse_n_zones(argv=None):
 
 _N_ZONES = _preparse_n_zones()
 
+import json
+import sys
 import yaml
 import argparse
 import gc
@@ -192,6 +194,19 @@ def cli():
                                 IEEE 738 derating for the grid's own region. >1 is
                                 beyond-physical and must be labelled as such.
                                 (default: 0.0)""")
+    parser.add_argument('--preflight', type=str, default=None,
+                        help="""Manifest written by preflight.py. Supplies the
+                                settings that were measured or calibrated
+                                BEFORE this run: the channel count r and the
+                                cond-diagnostic agent (both determined with no
+                                policy and no return), and max_trust (swept on
+                                held-out seeds). Task settings in the manifest
+                                must match this run's, and a seed the manifest
+                                was CALIBRATED on is refused for evaluation --
+                                calibrating and reporting on the same seed is
+                                fitting to the test set (spec 8.4). Anything
+                                given explicitly on the command line wins over
+                                the manifest, and says so in the log.""")
     parser.add_argument('--dlr_spatial', type=str, default=None,
                         choices=["true", "false"],
                         help="""Per-zone ('true') or uniform ('false') ampacity.
@@ -217,6 +232,18 @@ def cli():
                         help="""Confidence gate. 'prediction' (default) = prediction gate
                                 x divisor gate x readiness. 'trace' is the known-bad gate,
                                 kept runnable as an ablation. (default: prediction)""")
+    parser.add_argument('--pact1_r', type=int, default=None,
+                        help="""Peer channels, split by coupling strength.
+                                Normally left unset and taken from a preflight
+                                manifest, where it is chosen by CONDITIONING
+                                under the basis's own reference distribution --
+                                a measurement of the operator, with no policy
+                                and no return in it. The r=1 default was
+                                measured at N=11 (r=2 conditioned worse, 3006
+                                vs 810); that measurement does not transfer to
+                                a finer partition, where one lumped channel
+                                averages more peers and drifts toward the
+                                intercept. (default: the env class default)""")
     parser.add_argument('--pact1_max_trust', type=float, default=1.0,
                         help="""Cap on the APPLIED compensation gain (T4, III.8).
                                 Compensation feeds the medium it compensates
@@ -348,6 +375,29 @@ if __name__ == "__main__":
     # pact1 block. An arm-specific dial would be worthless as evidence.
     task.config["severity"] = args.severity
 
+    # A --pact1_* flag on a non-PACT1 arm is silently INERT: the pact1 block
+    # below is only written when alg == "PACT1", so for MAPPO/MASAC the yaml
+    # default `pact1: {}` stands and common.py builds a plain PZMAEnvDLR.
+    #
+    # Harmless in itself, but it reads as if the baseline were configured with
+    # a method hyperparameter, and it hides a real trap: `--alg MAPPO
+    # --pact1_ff_gain 1.0` looks like the mandatory information-matched
+    # baseline (spec 12.3) and silently produces a BLIND arm instead. Refuse it
+    # and say how to build that arm properly.
+    _pact_flags = sorted({t.split("=")[0].lstrip("-") for t in sys.argv[1:]
+                          if t.startswith("--pact1_")})
+    if _pact_flags and alg != "PACT1":
+        raise SystemExit(
+            f"--alg {alg} does not read {_pact_flags}: the pact1 block is only "
+            f"built for --alg PACT1, so these would be silently ignored.\n"
+            "  blind baseline           : --alg MAPPO   (no --pact1_* at all)\n"
+            "  information-matched      : --alg PACT1 --pact1_max_trust 0.0 "
+            "--pact1_ff_gain 1.0\n"
+            "      (max_trust 0 -> the gate returns g=0 every step, so the peer\n"
+            "       term is exactly zero and only the local analytic\n"
+            "       feedforward remains -- the arm spec 12.3 requires)\n"
+            "  peer-only (coordination) : --alg PACT1 --pact1_ff_gain 0.0")
+
     if alg == "PACT1":
         task.config["pact1"] = {
             "enabled": True,
@@ -358,6 +408,8 @@ if __name__ == "__main__":
             "ff_gain": args.pact1_ff_gain,
             "log": os.path.join(ROOT_DIR, args.pact1_log),
         }
+        if args.pact1_r is not None:
+            task.config["pact1"]["r"] = args.pact1_r
     
     # Loads from "benchmarl/conf/model/layers/mlp.yaml"
     model_config = MlpConfig.get_from_yaml()
@@ -435,6 +487,68 @@ if __name__ == "__main__":
             raise SystemExit(
                 f"--n_zones {n_zones} but {zones_path} defines "
                 f"{len(task.config['zone_names'])} zones")
+    # ---- preflight manifest --------------------------------------------
+    # Applied here, after the yaml merge, for the same reason as everything
+    # else in this block. Two guards, both enforced in code rather than in a
+    # README, because a README does not stop anyone at 2am:
+    #   1. the manifest's task must match this run's, or its measurements
+    #      describe a different environment;
+    #   2. a seed the manifest was CALIBRATED on cannot be evaluated on.
+    if args.preflight is not None:
+        with open(args.preflight, "r", encoding="utf-8") as f:
+            _mf = json.load(f)
+        _task_now = {
+            "n_zones": len(task.config.get("zone_names") or []),
+            "severity": float(args.severity),
+            "chronics": str(args.chronics) if args.chronics else None,
+            "safe_max_rho": task.config.get("safe_max_rho"),
+            "dlr_spatial": task.config.get("dlr_spatial"),
+        }
+        _bad = [k for k in ("n_zones", "severity", "safe_max_rho", "dlr_spatial")
+                if str(_mf.get("task", {}).get(k)) != str(_task_now.get(k))]
+        if _bad:
+            raise SystemExit(
+                f"--preflight {os.path.basename(args.preflight)} was measured on a "
+                f"different task; mismatched: {_bad}\n"
+                f"  manifest: { {k: _mf.get('task', {}).get(k) for k in _bad} }\n"
+                f"  this run: { {k: _task_now.get(k) for k in _bad} }\n"
+                "Regenerate the manifest for this task, or fix the flags.")
+
+        _cal = _mf.get("calibrated") or {}
+        _cs = set(_cal.get("calib_seeds") or [])
+        _clash = sorted(_cs & set(seeds))
+        if _clash:
+            raise SystemExit(
+                f"seed(s) {_clash} were used to CALIBRATE this manifest "
+                f"(max_trust={_cal.get('max_trust')}).\n"
+                "Evaluating on a calibration seed is fitting to the test set "
+                "(PACT_PIPELINE_SPEC 8.4).\n"
+                f"Evaluate on seeds outside {sorted(_cs)}.")
+
+        _blind = _mf.get("blind") or {}
+        _explicit = {t.split("=")[0].lstrip("-") for t in sys.argv[1:]
+                     if t.startswith("--")}
+        if alg == "PACT1":
+            _pc = task.config.setdefault("pact1", {})
+            for _key, _val, _flag in (
+                    ("r", _blind.get("r"), "pact1_r"),
+                    ("max_trust", _cal.get("max_trust"), "pact1_max_trust")):
+                if _val is None:
+                    continue
+                if _flag in _explicit:
+                    print(f"[preflight] {_key}: command line "
+                          f"{getattr(args, _flag, '?')} OVERRIDES manifest {_val}")
+                else:
+                    _pc[_key] = _val
+                    print(f"[preflight] {_key} = {_val} (from manifest)")
+        print(f"[preflight] {os.path.basename(args.preflight)}  git "
+              f"{_mf.get('git_rev')}  r={_blind.get('r')} "
+              f"max_trust={_cal.get('max_trust')} "
+              f"cond_agent={_blind.get('cond_agent')}")
+        if _blind.get("zones_without_lever"):
+            print(f"[preflight] {len(_blind['zones_without_lever'])} zones have "
+                  f"no curtailable generator: {_blind['zones_without_lever']}")
+
     _spatial = task.config.get("dlr_spatial")
     print(f"[task] severity={args.severity}  "
           f"chronics={task.config.get('regex_filter_chronics')!r}  "
