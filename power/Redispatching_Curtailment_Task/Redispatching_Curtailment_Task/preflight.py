@@ -404,6 +404,13 @@ def phase_b(args, blind):
     print(f"    evaluation seeds {args.eval_seeds} are EXCLUDED and will be "
           f"refused by main.py --preflight")
 
+    # Phase A chose r by conditioning; the calibration runs have to USE it, or
+    # max_trust is swept on a different basis than the one training will run
+    # with and the winner does not transfer.
+    r_flag = ["--pact1_r", str(blind["r"])] if blind.get("r") else []
+    if r_flag:
+        print(f"    calibrating at r={blind['r']} (phase A's choice)")
+
     table = []
     for mt in args.trust_grid:
         rets = []
@@ -411,7 +418,7 @@ def phase_b(args, blind):
             extra = ["--alg", "PACT1", "--pact1_gate", args.gate,
                      "--pact1_max_trust", str(mt),
                      "--pact1_ff_gain", str(args.ff_gain),
-                     "--pact1_log", f"calib_mt{mt}_s{s}.csv"]
+                     "--pact1_log", f"calib_mt{mt}_s{s}.csv"] + r_flag
             d = _run_one(args, s, extra, f"max_trust={mt} seed={s}")
             r = _return_of(d) if d else None
             if r is not None:
@@ -688,15 +695,26 @@ def main():
         "blind": blind,
         "calibrated": None,
     }
-    if args.calibrate:
-        manifest["calibrated"] = phase_b(args, blind)
-
     out = args.out or os.path.join(
         HERE, f"preflight_N{args.n_zones}_sev{args.severity:g}"
               f"_{args.chronics}.json")
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-    print(f"\nmanifest -> {out}")
+
+    def _save():
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+    # Write phase A NOW, before the sweep. Phase B is hours of training per
+    # grid point; losing a completed phase A because the sweep was killed at
+    # hour 40 is avoidable, and a manifest with calibrated=null is still
+    # useful -- main.py --preflight will use its r and say max_trust is
+    # uncalibrated rather than refusing.
+    _save()
+    print(f"\nmanifest (phase A) -> {out}")
+
+    if args.calibrate:
+        manifest["calibrated"] = phase_b(args, blind)
+        _save()
+        print(f"manifest (phase A + calibration) -> {out}")
     if args.emit_commands:
         emit_commands(out, manifest)
     print("Commit this manifest BEFORE the evaluation runs: it is the record "
