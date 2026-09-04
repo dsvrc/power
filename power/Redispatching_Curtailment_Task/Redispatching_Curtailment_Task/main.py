@@ -207,6 +207,24 @@ def cli():
                                 fitting to the test set (spec 8.4). Anything
                                 given explicitly on the command line wins over
                                 the manifest, and says so in the log.""")
+    parser.add_argument('--calib_seeds', type=int, nargs='+',
+                        default=[100, 101],
+                        help="""Seeds --preflight auto calibrates max_trust on.
+                                Must not overlap --seeds: calibrating on the
+                                seed you report is fitting to the test set
+                                (spec 8.4), and both preflight.py and the
+                                manifest guard refuse it. (default: 100 101)""")
+    parser.add_argument('--calib_frames', type=int, default=400_000,
+                        help="Frames per calibration run. (default: 400_000)")
+    parser.add_argument('--trust_grid', type=float, nargs='+',
+                        default=[0.05, 0.1, 0.2, 0.35, 0.5],
+                        help="""max_trust values --preflight auto sweeps. The
+                                whole table is kept in the manifest: the
+                                inverted-U is the T4 evidence, so the sweep is
+                                the result and the argmax is a by-product.""")
+    parser.add_argument('--no_calibrate', action='store_true',
+                        help="""--preflight auto does phase A only, leaving
+                                max_trust at whatever --pact1_max_trust says.""")
     parser.add_argument('--dlr_spatial', type=str, default=None,
                         choices=["true", "false"],
                         help="""Per-zone ('true') or uniform ('false') ampacity.
@@ -494,6 +512,70 @@ if __name__ == "__main__":
     #   1. the manifest's task must match this run's, or its measurements
     #      describe a different environment;
     #   2. a seed the manifest was CALIBRATED on cannot be evaluated on.
+    # The EFFECTIVE per-zone-ampacity setting. `None` in the task config means
+    # "whatever the env class defaults to", which is PZMAEnvDLR(dlr_spatial=
+    # True) -- per-zone. Resolving it once here matters: the preflight manifest
+    # records what was measured, and if the manifest wrote False while the run
+    # reported None, the task-match guard below would reject a manifest this
+    # same code had just generated.
+    _eff_spatial = task.config.get("dlr_spatial")
+    if _eff_spatial is None:
+        _eff_spatial = True
+
+    if args.preflight == "auto":
+        # One command: measure the task, calibrate max_trust, then train.
+        #
+        # The manifest is cached, so this cost is paid once per task and reused
+        # by every later run of it. Calibration runs on --calib_seeds, which
+        # must not contain the seeds being trained here -- preflight.py refuses
+        # otherwise, and the guard below refuses again when the manifest is
+        # read. Nothing about the seeds being reported feeds the choice.
+        #
+        # MAPPO has no max_trust, so --alg MAPPO only ever triggers phase A.
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _n = len(task.config.get("zone_names") or [])
+        _auto = os.path.join(
+            _here, f"preflight_N{_n}_sev{args.severity:g}_"
+                   f"{args.chronics or 'config'}.json")
+
+        _have = os.path.exists(_auto)
+        _needs_cal = False
+        if _have and alg == "PACT1" and not args.no_calibrate:
+            with open(_auto, "r", encoding="utf-8") as f:
+                _needs_cal = (json.load(f).get("calibrated") or {}).get(
+                    "max_trust") is None
+        if not _have or _needs_cal:
+            _cal = (alg == "PACT1") and not args.no_calibrate
+            print(f"[preflight] auto: "
+                  + ("recalibrating " if _needs_cal else
+                     f"no manifest at {os.path.basename(_auto)}; building ")
+                  + ("(phase A + max_trust sweep on seeds "
+                     f"{args.calib_seeds})" if _cal else "(phase A only)"))
+            _cmd = [sys.executable, os.path.join(_here, "preflight.py"),
+                    "--n_zones", str(_n), "--severity", str(args.severity),
+                    "--chronics", str(args.chronics or "summer"),
+                    "--safe_max_rho", str(task.config.get("safe_max_rho")),
+                    "--dlr_spatial", "true" if _eff_spatial else "false",
+                    "--out", _auto]
+            if _cal:
+                _cmd += ["--calibrate",
+                         "--calib-seeds"] + [str(s) for s in args.calib_seeds] \
+                    + ["--eval-seeds"] + [str(s) for s in seeds] \
+                    + ["--calib-frames", str(args.calib_frames),
+                       "--trust-grid"] + [str(t) for t in args.trust_grid] \
+                    + ["--lr", str(lr),
+                       "--mappo-n-episode", str(MAPPO_n_episode),
+                       "--gate", args.pact1_gate,
+                       "--ff-gain", str(args.pact1_ff_gain)]
+            import subprocess as _sp
+            if _sp.run(_cmd, cwd=_here).returncode != 0:
+                raise SystemExit(
+                    "preflight failed; fix that before training. Run it "
+                    "directly to see the error:\n  " + " ".join(_cmd[1:]))
+        else:
+            print(f"[preflight] auto: reusing {os.path.basename(_auto)}")
+        args.preflight = _auto
+
     if args.preflight is not None:
         with open(args.preflight, "r", encoding="utf-8") as f:
             _mf = json.load(f)
@@ -502,7 +584,7 @@ if __name__ == "__main__":
             "severity": float(args.severity),
             "chronics": str(args.chronics) if args.chronics else None,
             "safe_max_rho": task.config.get("safe_max_rho"),
-            "dlr_spatial": task.config.get("dlr_spatial"),
+            "dlr_spatial": _eff_spatial,
         }
         _bad = [k for k in ("n_zones", "severity", "safe_max_rho", "dlr_spatial")
                 if str(_mf.get("task", {}).get(k)) != str(_task_now.get(k))]

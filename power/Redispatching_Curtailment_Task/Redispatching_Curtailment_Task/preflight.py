@@ -158,16 +158,23 @@ def _git_rev():
 # phase A -- blind measurements of the task
 # ---------------------------------------------------------------------------
 
-def _make_env(args, zones_file, zone_names, pact1=None):
-    """Build the same env class the training run builds."""
-    from utils import G2OP_ENV_DIR                            # noqa: PLC0415
+def _make_env(args, zones_file, zone_names, g2op_env_dir):
+    """Build the same env class the training run builds.
+
+    `g2op_env_dir` is passed in rather than imported here on purpose: phase_a
+    puts the G2OpPowerGrid directory on sys.path so `pact1.*` resolves, and that
+    directory contains its OWN utils.py (the zone helpers). A later
+    `from utils import ...` then binds to the wrong module. gate_severity.py and
+    theory_*.py dodge this by importing the task-level utils BEFORE the insert;
+    phase_a now does the same and hands the value down.
+    """
     CHRONICS = {
         "summer": r".*-07-.*$", "winter": r".*-02-.*$",
         "jja": r".*-0[678]-.*$", "djf": r".*-(12|01|02)-.*$",
         "feb": r".*-02-.*$", "all": None,
     }
     cfg = dict(
-        env_name=os.path.join(G2OP_ENV_DIR, "l2rpn_idf_2023"),
+        env_name=os.path.join(g2op_env_dir, "l2rpn_idf_2023"),
         zone_names=zone_names, zones_file=zones_file,
         use_global_obs=False, use_redispatching_agent=True,
         env_g2op_config={}, local_rewards=None, shuffle_chronics=True,
@@ -181,6 +188,11 @@ def _make_env(args, zones_file, zone_names, pact1=None):
 
 def phase_a(args):
     """Everything determinable without a policy, a reward or a return."""
+    # ORDER MATTERS. The task directory and ENV_DIR both contain a utils.py,
+    # and they are different modules. Bind the task-level one FIRST, so it is
+    # in sys.modules before ENV_DIR joins sys.path; everything after this line
+    # that says `utils` then still means the right file.
+    from utils import G2OP_ENV_DIR                            # noqa: PLC0415
     sys.path.insert(0, ENV_DIR)
     from make_zones import select_partition                   # noqa: PLC0415
     from pact1.basis import (CouplingBasis, get_ptdf,         # noqa: PLC0415
@@ -209,7 +221,7 @@ def phase_a(args):
               "intercept mass, not signal.")
 
     print("\n[A2] building env (this is the slow part) ...")
-    env_pz = _make_env(args, zones_file, zone_names)
+    env_pz = _make_env(args, zones_file, zone_names, G2OP_ENV_DIR)
     env = env_pz.env_g2op
     ptdf = get_ptdf(env)
     out["ptdf"] = ptdf is not None
@@ -476,6 +488,70 @@ def emit_commands(path, manifest):
     return sh
 
 
+def run_campaign(args, manifest, manifest_path):
+    """Phase A -> calibration -> every arm, in one invocation.
+
+    This is the "just do it in one command" path.  What it does NOT do is pick
+    hyperparameters per evaluation seed: the calibration ran on
+    --calib-seeds, the evaluation runs on --eval-seeds, and the two are
+    disjoint by construction.  Tuning inside the evaluation run would mean
+    each seed's PACT was fitted to the seed it is reported on, while the
+    baseline was not -- which measures tuning budget, not mechanism.
+    """
+    cal = manifest.get("calibrated") or {}
+    mt = cal.get("max_trust")
+    arms = [
+        ("mappo", ["--alg", "MAPPO"], "blind baseline"),
+        ("ff_only", ["--alg", "PACT1", "--pact1_max_trust", "0.0",
+                     "--pact1_ff_gain", "1.0"],
+         "information-matched: host + the same analytic feedforward (spec 12.3)"),
+        ("peer_only", ["--alg", "PACT1", "--pact1_ff_gain", "0.0"],
+         "coordination term alone -- this one decides the framing"),
+        ("pact", ["--alg", "PACT1"], "PACT full"),
+    ]
+    print(f"\n[C] campaign: {len(arms)} arms x {len(args.eval_seeds)} seeds "
+          f"x {args.frames:,} frames")
+    if mt is None:
+        print("    WARNING: no calibrated max_trust in the manifest; the PACT "
+              "arms will use\n             the command-line default. Run with "
+              "--calibrate to fix that.")
+    results = {}
+    for tag, extra, why in arms:
+        print(f"\n    -- {tag}: {why}")
+        for s in args.eval_seeds:
+            cmd = list(extra) + ["--preflight", os.path.abspath(manifest_path)]
+            if tag != "mappo":
+                cmd += ["--pact1_log", f"{tag}_s{s}.csv"]
+            saved = args.calib_frames
+            args.calib_frames = args.frames        # _run_one reads this
+            d = _run_one(args, s, cmd, f"{tag} seed={s}")
+            args.calib_frames = saved
+            results.setdefault(tag, {})[s] = _return_of(d) if d else None
+
+    print("\n" + "=" * 62)
+    print(f"  {'seed':>6}" + "".join(f"{t:>13s}" for t, _, _ in arms))
+    for s in args.eval_seeds:
+        row = "".join(
+            f"{results.get(t, {}).get(s):13.1f}"
+            if isinstance(results.get(t, {}).get(s), float) else f"{'n/a':>13s}"
+            for t, _, _ in arms)
+        print(f"  {s:>6}" + row)
+    base = [results.get("mappo", {}).get(s) for s in args.eval_seeds]
+    for t, _, _ in arms[1:]:
+        d = [(results.get(t, {}).get(s), b) for s, b in
+             zip(args.eval_seeds, base)]
+        d = [a - b for a, b in d if isinstance(a, float) and isinstance(b, float)]
+        if d:
+            print(f"  paired mean {t} - mappo: {np.mean(d):+.1f} "
+                  f"over {len(d)} seeds")
+    print("=" * 62)
+    print("  Paired differences over a handful of seeds are not a result on")
+    print("  their own -- bootstrap the mean of d, and compare at a COMMON")
+    print("  horizon: runs stop at different iteration counts and the longer")
+    print("  one flatters itself.")
+    return results
+
+
 def selfcheck():
     """Logic checks that need no grid2op, no dataset and no training."""
     n, bad = 0, []
@@ -572,6 +648,14 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-5)
     ap.add_argument("--mappo-n-episode", type=int, default=30)
     ap.add_argument("--emit-commands", action="store_true")
+    ap.add_argument("--run-campaign", action="store_true",
+                    help="after writing the manifest, run every arm on "
+                         "--eval-seeds. One command for the whole thing; the "
+                         "calibration/evaluation seed split is still enforced.")
+    ap.add_argument("--frames", type=int, default=2_000_000,
+                    help="frames per EVALUATION run in --run-campaign "
+                         "(default 2M; PACT was still climbing at 2M on N=11, "
+                         "and a short run measures the warm-up, not the method)")
     ap.add_argument("--selfcheck", action="store_true")
     args = ap.parse_args()
 
@@ -608,6 +692,9 @@ def main():
         emit_commands(out, manifest)
     print("Commit this manifest BEFORE the evaluation runs: it is the record "
           "that\nthe settings were chosen without seeing the evaluation seeds.")
+    if args.run_campaign:
+        check_seed_disjoint(args.calib_seeds, args.eval_seeds)
+        run_campaign(args, manifest, out)
     return 0
 
 

@@ -177,6 +177,31 @@ Both guards are enforced in code: `main.py --preflight` refuses a manifest
 measured on a different task, and refuses to evaluate on any seed the manifest
 was calibrated on. Commit the manifest before the evaluation runs.
 
+### One command for the whole campaign
+
+Add `--run-campaign` and it does phase A, the calibration sweep, and then all
+four arms on the evaluation seeds, printing a paired table at the end:
+
+```bash
+python preflight.py --n_zones 22 --severity 1.0 --chronics summer --safe_max_rho 0.7 --dlr_spatial false --calibrate --calib-seeds 100 101 --eval-seeds 0 1 2 3 4 --run-campaign
+```
+
+### Or skip the manifest entirely: `--preflight auto`
+
+Phase A has no return in it, so `main.py` can just do it. `--preflight auto`
+looks for `preflight_N<N>_sev<S>_<chronics>.json`, generates it (phase A only)
+if missing, and reuses it afterwards:
+
+```bash
+python main.py --preflight auto --n_frames 2_000_000 --seeds 0 --n_zones 22 --severity 1.0 --chronics summer --safe_max_rho 0.7 --dlr_spatial false --alg MAPPO
+```
+
+**What `auto` does not do is calibrate.** `max_trust` stays wherever the command
+line put it, and the run says so. Calibrating inside the evaluation run would
+mean fitting each seed's `max_trust` to the seed it is reported on — while the
+baseline gets no such treatment — which measures tuning budget rather than
+mechanism. That is why phase B keeps its own seeds.
+
 `--emit-commands` writes `*_campaign.sh` with all four arms wired to it.
 
 ### Why `r` is worth choosing rather than defaulting
