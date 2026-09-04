@@ -45,10 +45,19 @@ def main():
     ap.add_argument("--thresholds", type=float, nargs="+",
                     default=[0.9, 0.8, 0.7, 0.6, 0.5])
     ap.add_argument("--steps", type=int, default=120)
+    ap.add_argument("--n_zones", type=int, default=11,
+                    help="measure on the N-zone partition from make_zones.py. "
+                         "steps/decision is a property of the ENVIRONMENT, so "
+                         "it has to be re-measured whenever the partition "
+                         "changes and then frozen identically for every arm.")
     args = ap.parse_args()
+
+    from make_zones import select_partition
+    zones_file, zone_names = select_partition(args.n_zones)
 
     regex = CHRONICS_PRESETS.get(args.chronics, args.chronics)
     print(f"severity={args.severity}  chronics={args.chronics} -> {regex!r}")
+    print(f"n_zones={len(zone_names)}  zones_file={os.path.basename(zones_file)}")
     print(f"{args.steps} agent decisions per threshold\n")
 
     from benchmarl.environments.G2OpPowerGrid.pact1.dlr_env import PZMAEnvDLR
@@ -59,7 +68,7 @@ def main():
     for thr in args.thresholds:
         cfg = dict(
             env_name=os.path.join(G2OP_ENV_DIR, "l2rpn_idf_2023"),
-            zone_names=[f"Zone{j}" for j in range(11)],
+            zone_names=zone_names, zones_file=zones_file,
             use_global_obs=False, use_redispatching_agent=True,
             env_g2op_config={}, local_rewards=None, shuffle_chronics=True,
             regex_filter_chronics=regex, safe_max_rho=thr, curtail_margin=30,

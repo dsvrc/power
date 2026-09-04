@@ -35,13 +35,24 @@ class PZMultiAgentEnv(ParallelEnv):
                  local_rewards = None,
                  shuffle_chronics = True,
                  regex_filter_chronics = None,
+                 zones_file = None,
                  ):
-                
+
+        # Which partition to build the agents from.  None keeps whatever this
+        # process already loaded (the shipped 11 zones, or whatever
+        # G2OP_ZONES_FILE named at import).  utils.set_zones_file mutates
+        # ZONES_DICT in place, so the name imported into this module by
+        # `from .utils import *` sees the new partition too -- rebinding there
+        # would silently leave this file reading the old one.
+        if zones_file is not None:
+            set_zones_file(zones_file)
+            print(f"[zones] {len(ZONES_DICT)} zones from {zones_file}")
+
         # Zones definition
         self.zone_names = np.sort(zone_names)
         for zone_name in self.zone_names:
             if zone_name not in ZONES_DICT.keys():
-                raise ValueError(f"Zone {zone_name} not found in zones_definitions.json. Possible zones are {list(ZONES_DICT.keys())}")
+                raise ValueError(f"Zone {zone_name} not found in {ZONES_FILE}. Possible zones are {list(ZONES_DICT.keys())}")
         self.zones_dict = {zone_name: ZONES_DICT[zone_name] for zone_name in self.zone_names}
         self.zones_dict = add_missing_keys(self.zones_dict)
 

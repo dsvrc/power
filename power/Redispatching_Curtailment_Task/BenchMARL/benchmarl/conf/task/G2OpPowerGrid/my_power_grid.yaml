@@ -5,6 +5,10 @@ defaults:
 
 env_name: l2rpn_idf_2023
 zone_names: ["Zone0", "Zone1", "Zone2", "Zone3", "Zone4", "Zone5", "Zone6", "Zone7", "Zone8", "Zone9", "Zone10"]
+# Zone partition. null = the shipped hand-drawn 11 zones, byte for byte.
+# main.py --n_zones <N> points this at zones_definitions_N<N>.json and rewrites
+# zone_names to match; generate those with `python make_zones.py --n-zones <N>`.
+zones_file: null
 use_global_obs: False
 use_redispatching_agent: True
 env_g2op_config: {}
@@ -17,3 +21,7 @@ curtail_margin: 30
 pact1: {}
 # Static thermal ratings by default = stock grid2op, unchanged.
 severity: 0.0
+# null = whatever the env class defaults to (per-zone), so this is a no-op
+# against every run made before the key existed. Set false for an N sweep:
+# dlr.zone_phase() takes n_zones, so per-zone weather moves when N moves.
+dlr_spatial: null

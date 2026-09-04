@@ -8,6 +8,56 @@ for _thread_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
                     "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ.setdefault(_thread_var, "1")
 
+
+def _preparse_n_zones(argv=None):
+    """Resolve --n_zones into G2OP_ZONES_FILE BEFORE benchmarl is imported.
+
+    Two reasons this cannot wait for argparse:
+
+      * benchmarl...G2OpPowerGrid.utils loads the partition at IMPORT time, and
+        that import happens three lines below.  Setting the variable after
+        argparse would leave this process holding the 11-zone file.
+      * collection runs in separate processes.  Under fork they inherit the
+        loaded module, but under spawn they re-import from scratch and only the
+        environment reaches them.  A worker silently building 11 agents while
+        the parent believes there are 22 is exactly the class of bug that is
+        invisible in the learning curve.
+
+    argparse still declares --n_zones, so --help is honest and a bad value is
+    still rejected; this only front-runs the file selection.
+    """
+    import sys as _sys
+    argv = _sys.argv[1:] if argv is None else argv
+    n = None
+    for i, tok in enumerate(argv):
+        if tok == "--n_zones" and i + 1 < len(argv):
+            n = argv[i + 1]
+        elif tok.startswith("--n_zones="):
+            n = tok.split("=", 1)[1]
+    if n is None:
+        return None
+    try:
+        n = int(n)
+    except ValueError:
+        raise SystemExit(f"--n_zones must be an integer, got {n!r}")
+    if n < 2:
+        raise SystemExit(f"--n_zones must be >= 2, got {n}")
+    here = os.path.dirname(os.path.abspath(__file__))
+    env_dir = os.path.join(here, os.pardir, "BenchMARL", "benchmarl",
+                           "environments", "G2OpPowerGrid")
+    name = ("zones_definitions.json" if n == 11
+            else f"zones_definitions_N{n}.json")
+    path = os.path.abspath(os.path.join(env_dir, name))
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"--n_zones {n}: {path} does not exist.\n"
+            f"Generate it first:  python make_zones.py --n-zones {n}")
+    os.environ["G2OP_ZONES_FILE"] = path
+    return n, path
+
+
+_N_ZONES = _preparse_n_zones()
+
 import yaml
 import argparse
 import gc
@@ -119,6 +169,22 @@ def cli():
                                 configs/expes_config.yaml so the summer and winter
                                 arms differ only by this flag. (default: use the
                                 config file)""")
+    parser.add_argument('--n_zones', type=int, default=None,
+                        help="""Number of zone agents, i.e. how finely the grid
+                                is partitioned. TASK structure: identical for
+                                every algorithm. 11 (default) is the shipped
+                                hand-drawn partition; any other N reads
+                                zones_definitions_N<N>.json, which
+                                `python make_zones.py --n-zones <N>` generates
+                                from electrical adjacency. N matters because
+                                the coordination-recoverable share of the
+                                derating damage rises with it: finer zones
+                                shrink each agent's LOCAL authority over its
+                                binding line while leaving the coupling
+                                untouched. Choose N from gate_severity.py and
+                                theory_scaling.py, never from a method's
+                                score, and commit the gate output first.
+                                (default: the config value, 11)""")
     parser.add_argument('--severity', type=float, default=0.0,
                         help="""Dynamic-line-rating severity. TASK physics: applied
                                 identically to MAPPO, MASAC and PACT1. 0 = static
@@ -126,6 +192,21 @@ def cli():
                                 IEEE 738 derating for the grid's own region. >1 is
                                 beyond-physical and must be labelled as such.
                                 (default: 0.0)""")
+    parser.add_argument('--dlr_spatial', type=str, default=None,
+                        choices=["true", "false"],
+                        help="""Per-zone ('true') or uniform ('false') ampacity.
+                                TASK physics: identical for every algorithm.
+                                REQUIRED to be 'false' for an N sweep --
+                                dlr.zone_phase() takes n_zones, so with per-zone
+                                weather the heat wave hits different regions at
+                                different N and the sweep changes the physics as
+                                well as the partition. Mean derating is
+                                N-invariant (0.82279 at sigma=1 for N=11/22/33),
+                                so this is a pattern change, not a severity
+                                change -- but it still rides along with the
+                                independent variable. Uniform is also what
+                                theory_scaling.py and theory_ceiling.py default
+                                to. (default: the env class default, per-zone)""")
     parser.add_argument('--pact1_trust', type=float, default=0.90,
                         help="""PACT-1 trust prior. Initialise NEAR the optimum and let
                                 the policy pull it down -- a hedged 0.5 measured ~1800
@@ -322,9 +403,52 @@ if __name__ == "__main__":
             args.chronics, args.chronics)
     if args.safe_max_rho is not None:
         task.config["safe_max_rho"] = args.safe_max_rho
+    if args.dlr_spatial is not None:
+        task.config["dlr_spatial"] = (args.dlr_spatial == "true")
+
+    # Zone partition. Applied AFTER the yaml merge for the same reason as the
+    # chronics filter above: the merge does config.config.update(...) and would
+    # otherwise put zone_names back to the 11 in my_power_grid.yaml, leaving a
+    # run that says --n_zones 22 on the command line and trains 11 agents.
+    # The partition FILE was already selected by _preparse_n_zones() before
+    # benchmarl was imported; this sets the agent list to match it.
+    # argparse accepts unambiguous prefixes (`--n_zon 22`), which the literal
+    # scan in _preparse_n_zones does not. Catching that here is the difference
+    # between a loud failure and a run that trains 11 agents while its log says
+    # 22.
+    if (args.n_zones is not None) != (_N_ZONES is not None):
+        raise SystemExit(
+            "--n_zones must be spelled in full so it can be applied before "
+            "benchmarl is imported. Write `--n_zones N`, not an abbreviation.")
+    if _N_ZONES is not None:
+        n_zones, zones_path = _N_ZONES
+        if n_zones != args.n_zones:
+            raise SystemExit(
+                f"--n_zones parsed inconsistently ({n_zones} vs "
+                f"{args.n_zones}); pass it once, as `--n_zones N`.")
+        from benchmarl.environments.G2OpPowerGrid.utils import (
+            set_zones_file, zone_names as _zone_names)
+        set_zones_file(zones_path)
+        task.config["zones_file"] = zones_path
+        task.config["zone_names"] = _zone_names(n_zones)
+        if len(task.config["zone_names"]) != n_zones:
+            raise SystemExit(
+                f"--n_zones {n_zones} but {zones_path} defines "
+                f"{len(task.config['zone_names'])} zones")
+    _spatial = task.config.get("dlr_spatial")
     print(f"[task] severity={args.severity}  "
           f"chronics={task.config.get('regex_filter_chronics')!r}  "
-          f"safe_max_rho={task.config.get('safe_max_rho')}")
+          f"safe_max_rho={task.config.get('safe_max_rho')}  "
+          f"n_zones={len(task.config.get('zone_names') or [])}  "
+          f"zones_file={os.path.basename(task.config.get('zones_file') or 'zones_definitions.json')}  "
+          f"dlr_spatial={'default(per-zone)' if _spatial is None else _spatial}")
+    if _N_ZONES is not None and args.severity > 0.0 and _spatial is not False:
+        print("[task] WARNING: --n_zones with per-zone ampacity. The spatial "
+              "weather model\n"
+              "       is a function of n_zones, so this sweep moves the "
+              "physics as well as\n"
+              "       the partition. Pass --dlr_spatial false to hold it "
+              "fixed.")
 
     experiment_config.save_folder = os.path.join(ROOT_DIR, "saved_models")
     os.makedirs(experiment_config.save_folder, exist_ok=True)

@@ -9,9 +9,85 @@ from grid2op.utils import EpisodeStatistics
 
 ENV_PATH = os.path.dirname(__file__)
 
+# ---------------------------------------------------------------------------
+# Which zone partition this process runs on.
+#
+# The shipped file hardcodes 11 hand-drawn zones and the environment builds one
+# agent per entry, so N is frozen at 11 unless this is swappable.  make_zones.py
+# generates zones_definitions_N<N>.json for any N from the grid's own adjacency.
+#
+# Selected by the environment variable G2OP_ZONES_FILE rather than by an
+# argument, for one reason that is not stylistic: collection runs in SEPARATE
+# PROCESSES.  Under fork the child inherits this module already imported, but
+# under spawn it re-imports from scratch, and an argument threaded through the
+# parent would not reach it.  An environment variable reaches both.  main.py
+# sets it from --n_zones before benchmarl is imported.
+# ---------------------------------------------------------------------------
 
-with open(os.path.join(ENV_PATH, "zones_definitions.json"), "r", encoding="utf-8") as file:
-    ZONES_DICT = json.load(file)
+def zones_file_for(n_zones):
+    """Path to the partition file for N zones. N=11 keeps the shipped file."""
+    if n_zones is None or int(n_zones) == 11:
+        return os.path.join(ENV_PATH, "zones_definitions.json")
+    return os.path.join(ENV_PATH, f"zones_definitions_N{int(n_zones)}.json")
+
+
+def load_zones_file(path):
+    with open(path, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+ZONES_FILE = os.environ.get("G2OP_ZONES_FILE") or os.path.join(
+    ENV_PATH, "zones_definitions.json")
+if not os.path.exists(ZONES_FILE):
+    raise FileNotFoundError(
+        f"zone partition {ZONES_FILE!r} does not exist. Generate it with:\n"
+        f"    python make_zones.py --n-zones <N>")
+ZONES_DICT = load_zones_file(ZONES_FILE)
+
+
+def set_zones_file(path):
+    """Point this process at a different partition, before any env is built.
+
+    ZONES_DICT is mutated IN PLACE, never rebound.  PZMultiAgentEnv does
+    `from .utils import *`, which binds the name in its own module namespace at
+    import time: rebinding here would leave that copy pointing at the old dict
+    and the env would silently build 11 agents while everything else believed
+    there were 22.  Mutation is seen by every holder of the object.
+    """
+    global ZONES_FILE
+    path = os.path.abspath(path)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"zone partition {path!r} does not exist. Generate it with:\n"
+            f"    python make_zones.py --n-zones <N>")
+    new = load_zones_file(path)
+    if not new:
+        raise ValueError(f"zone partition {path!r} is empty")
+    ZONES_DICT.clear()
+    ZONES_DICT.update(new)
+    ZONES_FILE = path
+    os.environ["G2OP_ZONES_FILE"] = path       # so collector workers inherit it
+    return ZONES_DICT
+
+
+def zone_names(n_zones=None):
+    """The zone names in the SAME order the env assigns agents.
+
+    PZMultiAgentEnv does np.sort(zone_names) and pact1/dlr_env.py does
+    sorted(ZONES_DICT.keys()), both lexicographic -- so "Zone10" sorts between
+    "Zone1" and "Zone2".  Odd-looking, but every consumer sorts the same way,
+    so agent_i <-> zone is consistent.  Returning the sorted list here keeps it
+    that way for callers that build the list themselves.
+    """
+    if n_zones is None:
+        return sorted(ZONES_DICT.keys())
+    names = sorted(f"Zone{i}" for i in range(int(n_zones)))
+    missing = [z for z in names if z not in ZONES_DICT]
+    if missing:
+        raise ValueError(
+            f"{ZONES_FILE} does not define {missing}. It has "
+            f"{len(ZONES_DICT)} zones: {sorted(ZONES_DICT.keys())}")
+    return names
 
 
 # attributes taken into account in the observation by default
@@ -30,12 +106,18 @@ act_attr_to_keep_default = ["curtail", "set_storage"]
 
 
 def add_missing_keys(zones_dict):
-    zone_names = zones_dict.keys()
+    # NOTE: this body used to read `zones_dict[zone_name][missing_keys] = []`,
+    # assigning through the SET rather than the key, which raises
+    # `TypeError: unhashable type: 'set'`.  It never fired because every zone
+    # in the shipped file carries all 18 fields, so the inner loop never ran --
+    # a generated partition with one field omitted would have hit it.
+    # make_zones.py emits the full schema so this stays a no-op either way.
+    zone_names = list(zones_dict.keys())
     every_keys = {key for zone_name in zone_names for key in zones_dict[zone_name].keys()}
     missing_keys_zones = [every_keys - set(zones_dict[zone_name].keys()) for zone_name in zone_names]
     for zone_name, missing_keys in zip(zone_names, missing_keys_zones):
         for missing_key in missing_keys:
-            zones_dict[zone_name][missing_keys] = []
+            zones_dict[zone_name][missing_key] = []
     return zones_dict
 
 
@@ -64,7 +146,7 @@ def get_zone_dict_from_names(zone_names: List[str]) -> Dict:
         missing_keys_zones = [every_keys - set(zones_dict[zone_name].keys()) for zone_name in zone_names]
         for zone_name, missing_keys in zip(zone_names, missing_keys_zones):
             for missing_key in missing_keys:
-                zones_dict[zone_name][missing_keys] = []
+                zones_dict[zone_name][missing_key] = []  # was [missing_keys]: see add_missing_keys
         final_dict = {}
         for key in every_keys:
             val_tmp = [zones_dict[zone_name][key] for zone_name in zone_names]

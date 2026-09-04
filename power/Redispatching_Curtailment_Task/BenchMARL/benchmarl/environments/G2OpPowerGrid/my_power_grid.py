@@ -10,6 +10,11 @@ class TaskConfig:
     # extra_features: bool = MISSING
     env_name: str = MISSING
     zone_names: list = MISSING
+    # Which zone partition to build the agents from. null = the shipped
+    # 11-zone file. Set by main.py --n_zones to a generated
+    # zones_definitions_N<N>.json (see make_zones.py). TASK structure, so it
+    # applies identically to every algorithm.
+    zones_file: str = MISSING
     use_global_obs: bool = MISSING
     use_redispatching_agent: bool = MISSING
     env_g2op_config: dict = MISSING
@@ -24,3 +29,8 @@ class TaskConfig:
     # Dynamic-line-rating severity. TASK physics, applied to every algorithm.
     # 0 = static ratings = stock grid2op; 1 = realistic IEEE 738 derating.
     severity: float = MISSING
+    # Per-zone (true) vs uniform (false) ampacity. TASK physics. null keeps the
+    # env class default. The spatial weather model is a function of n_zones, so
+    # an N sweep must set this to false or N moves the weather as well as the
+    # partition.
+    dlr_spatial: bool = MISSING

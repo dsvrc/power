@@ -36,10 +36,40 @@ SPREAD_DEAD = 0.05
 W_FLOOR = 1e-9
 
 
+_ZONES_CACHE = {}
+
+
+def zones_path():
+    """Which partition file this process reads.
+
+    G2OP_ZONES_FILE selects a generated partition (make_zones.py) so the same
+    code runs at N != 11; unset, it is the shipped 11-zone file and nothing
+    changes.  This module is imported both as `benchmarl...pact1.basis` and,
+    by gate_severity.py / theory_*.py, as a top-level `pact1.basis` off a
+    sys.path insert -- so it cannot reach utils.py by relative import, and the
+    environment variable is what the two entry points share.
+    """
+    return os.environ.get("G2OP_ZONES_FILE") or os.path.join(
+        ENV_PATH, "zones_definitions.json")
+
+
 def _load_zones():
-    with open(os.path.join(ENV_PATH, "zones_definitions.json"), "r",
-              encoding="utf-8") as f:
-        return json.load(f)
+    # Cached on (path, mtime): theory_ceiling.decompose() calls this once per
+    # simulator step, and re-parsing ~90 KB of json 400 times an episode is
+    # pure waste.  mtime in the key means a regenerated partition is still
+    # picked up.
+    path = zones_path()
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError as exc:
+        raise FileNotFoundError(
+            f"zone partition {path!r} does not exist. Generate it with:\n"
+            f"    python make_zones.py --n-zones <N>") from exc
+    if key not in _ZONES_CACHE:
+        with open(path, "r", encoding="utf-8") as f:
+            _ZONES_CACHE.clear()
+            _ZONES_CACHE[key] = json.load(f)
+    return _ZONES_CACHE[key]
 
 
 def get_ptdf(env):

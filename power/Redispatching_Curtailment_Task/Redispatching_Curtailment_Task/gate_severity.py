@@ -44,8 +44,11 @@ sys.path.insert(0, os.path.join(
 from pact1 import dlr                                          # noqa: E402
 from pact1.basis import (_load_zones, get_ptdf,                # noqa: E402
                          ptdf_zone_coupling)
+from make_zones import select_partition                        # noqa: E402
 
 ENV = os.path.join(G2OP_ENV_DIR, "l2rpn_idf_2023")
+# Rebound by --n-zones. Every gate below reads it, so the partition under test
+# is a single decision made once, not eleven implicit ones.
 ZONES = [f"Zone{i}" for i in range(11)]
 
 
@@ -224,7 +227,20 @@ def main():
                     default="summer",
                     help="summer = where derating bites; winter = placebo arm "
                          "where the dial provably does nothing")
+    ap.add_argument("--n-zones", type=int, default=None,
+                    help="certify the gates on the N-zone partition generated "
+                         "by make_zones.py (default: the shipped 11). G4 is "
+                         "the blocking one as N rises: a partition so fine "
+                         "that agents have no levers is throughput-limited, "
+                         "and no method recovers that.")
     args = ap.parse_args()
+
+    global ZONES
+    if args.n_zones is not None:
+        path, ZONES = select_partition(args.n_zones)
+        print(f"[zones] N={len(ZONES)} from {os.path.basename(path)}")
+    else:
+        print(f"[zones] N={len(ZONES)} from zones_definitions.json (shipped)")
 
     env = make_env()
     base_limits = np.array(env.get_thermal_limit(), dtype=np.float64, copy=True)

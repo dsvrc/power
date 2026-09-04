@@ -43,15 +43,25 @@ def main():
     ap.add_argument("--chronics", default="summer")
     ap.add_argument("--steps", type=int, default=25)
     ap.add_argument("--pact1", action="store_true")
+    ap.add_argument("--n_zones", type=int, default=11,
+                    help="build on the N-zone partition from make_zones.py. "
+                         "Run this before any long run at a new N: it is the "
+                         "cheapest way to find out whether the observation and "
+                         "action spaces actually assemble.")
     args = ap.parse_args()
+
+    from make_zones import select_partition
+    zones_file, zone_names = select_partition(args.n_zones)
 
     regex = CHRONICS_PRESETS.get(args.chronics, args.chronics)
     print(f"severity={args.severity}  chronics={args.chronics} -> {regex!r}")
+    print(f"n_zones={len(zone_names)}  zones_file={os.path.basename(zones_file)}")
     print(f"RSS before build: {rss_mb():.0f} MB")
 
     cfg = dict(
         env_name=os.path.join(G2OP_ENV_DIR, "l2rpn_idf_2023"),
-        zone_names=[f"Zone{j}" for j in range(11)],
+        zone_names=zone_names,
+        zones_file=zones_file,
         use_global_obs=False,
         use_redispatching_agent=True,
         env_g2op_config={},

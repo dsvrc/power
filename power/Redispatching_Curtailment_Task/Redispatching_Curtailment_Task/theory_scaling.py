@@ -19,10 +19,26 @@ Measured on the shipped 11-zone partition: PEER = 8.3% (uniform ratings),
 regime where a coordination method has room -- and the choice was made by
 physics, before any method ran, which is what makes it defensible.
 
-The partition here is built from electrical adjacency, not hand-drawn: a
-line belongs to a zone when BOTH endpoints are inside it, a generator when its
-substation is.  Real grids are operated with many more control areas than 11,
-so finer partitions are the realistic direction, not an artificial one.
+The partition comes from make_zones.py, which cuts the substation graph itself
+by recursive spectral bisection: a line belongs to a zone when BOTH endpoints
+are inside it, a generator when its substation is.  Real grids are operated
+with many more control areas than 11, so finer partitions are the realistic
+direction, not an artificial one.
+
+HISTORY: the first version of this file approximated the partition with
+contiguous substation-index BLOCKS, which is fast but not electrical -- two
+substations with adjacent ids need not be connected, and a "zone" could be
+several disconnected pieces.  The table that approximation produced
+
+     N   irreducible   own    PEER
+     6      12.9%     80.5%   6.6%
+    11      17.3%     60.2%  22.6%
+    22      15.2%     56.8%  28.0%
+    33      17.6%      9.4%  73.1%
+
+is therefore an estimate of the SHAPE, not of the values.  It is still
+reachable with --partition blocks so it stays reproducible, but every number
+must be recomputed on the real partition before it is trusted or quoted.
 """
 import argparse
 import os
@@ -41,6 +57,7 @@ sys.path.insert(0, os.path.join(
     "BenchMARL", "benchmarl", "environments", "G2OpPowerGrid"))
 from pact1 import dlr                                          # noqa: E402
 from pact1.basis import get_ptdf                               # noqa: E402
+from make_zones import select_partition                        # noqa: E402
 
 PRESETS = {"summer": r".*-07-.*$", "winter": r".*-02-.*$"}
 
@@ -63,13 +80,19 @@ def make_env(regex):
     return env
 
 
-def build_partition(env, n_zones):
+def build_partition_blocks(env, n_zones):
     """Contiguous substation blocks -> line and generator ownership.
 
-    Substations are numbered along the grid, so contiguous blocks approximate
-    electrical regions.  A line is owned only when BOTH endpoints are inside a
-    block; lines spanning blocks are TIE-LINES and belong to nobody, which is
-    exactly the situation where no single agent can fix an overload alone.
+    A fast APPROXIMATION, kept because it is what produced the first scaling
+    table and dropping it would make that table unreproducible.  Substations
+    are numbered roughly along the grid, so contiguous blocks are correlated
+    with electrical regions -- but only correlated: two substations with
+    adjacent ids need not be connected at all, and a "zone" here can be several
+    disconnected pieces.  Use --partition generated for the real thing.
+
+    A line is owned only when BOTH endpoints are inside a block; lines spanning
+    blocks are TIE-LINES and belong to nobody, which is exactly the situation
+    where no single agent can fix an overload alone.
     """
     n_sub = env.n_sub
     edges = np.linspace(0, n_sub, n_zones + 1).astype(int)
@@ -79,6 +102,36 @@ def build_partition(env, n_zones):
 
     lor, lex = env.line_or_to_subid, env.line_ex_to_subid
     line_zone = np.where(sub_zone[lor] == sub_zone[lex], sub_zone[lor], -1)
+    gen_zone = sub_zone[env.gen_to_subid]
+    return sub_zone, line_zone, gen_zone
+
+
+def build_partition_generated(env, n_zones):
+    """The real partition: read zones_definitions_N<N>.json.
+
+    Zone INDEX is the position in the lexicographically sorted name list, which
+    is the order PZMultiAgentEnv and pact1/dlr_env.py both use -- so `zi` here
+    is the same zone the spatial ampacity model rates as `zi`, and the two
+    cannot silently disagree.
+    """
+    import json
+    path, names = select_partition(n_zones)
+    with open(path, "r", encoding="utf-8") as f:
+        zones = json.load(f)
+
+    sub_zone = np.full(env.n_sub, -1, dtype=int)
+    for zi, z in enumerate(names):
+        for s in zones[z]["sub_inside_ids"]:
+            if 0 <= int(s) < env.n_sub:
+                sub_zone[int(s)] = zi
+    # The shipped hand-drawn 11 leave 17 substations on the seams, owned by
+    # nobody.  Generated partitions cover everything; either way -1 propagates
+    # correctly below, so a seam line is treated as a tie-line, which is what
+    # it is.
+    lor, lex = env.line_or_to_subid, env.line_ex_to_subid
+    both_known = (sub_zone[lor] >= 0) & (sub_zone[lex] >= 0)
+    line_zone = np.where(both_known & (sub_zone[lor] == sub_zone[lex]),
+                         sub_zone[lor], -1)
     gen_zone = sub_zone[env.gen_to_subid]
     return sub_zone, line_zone, gen_zone
 
@@ -134,7 +187,17 @@ def main():
     ap.add_argument("--max-steps", type=int, default=400)
     ap.add_argument("--chronics", default="summer")
     ap.add_argument("--spatial", action="store_true")
+    ap.add_argument("--partition", choices=["generated", "blocks"],
+                    default="generated",
+                    help="'generated' (default) reads the real partitions from "
+                         "make_zones.py; 'blocks' reproduces the contiguous "
+                         "index-block approximation the first scaling table "
+                         "used. The two will NOT agree and the generated one "
+                         "is the number to trust.")
     args = ap.parse_args()
+
+    build_partition = (build_partition_generated if args.partition == "generated"
+                       else build_partition_blocks)
 
     env = make_env(PRESETS.get(args.chronics, args.chronics))
     env_gen_bus = env.gen_to_subid
@@ -149,7 +212,7 @@ def main():
           f"{len(curtail_ids)} curtailable renewables")
     print(f"sigma={args.sigma}  ratings="
           f"{'per-zone' if args.spatial else 'uniform'}  "
-          f"chronics={args.chronics}\n")
+          f"chronics={args.chronics}  partition={args.partition}\n")
     print(f"{'N zones':>8} {'gens/zone':>10} {'tie-line%':>10} {'n_steps':>8} | "
           f"{'irreduc':>8} {'own':>8} {'PEER':>8}")
 

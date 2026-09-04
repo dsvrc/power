@@ -46,15 +46,28 @@ class G2OpPowerGridClass(TaskClass):
         # identical dynamics at a given sigma.  severity == 0 keeps the stock
         # class and the stock code path exactly.
         severity = float(config.pop("severity", 0.0) or 0.0)
+        # Uniform vs per-zone derating.  Popped rather than passed through
+        # because PZMAEnvRecoDNLimit -- the severity == 0 path -- knows nothing
+        # about the dial and would reject the keyword.
+        #
+        # This matters for an N sweep: the spatial weather model takes n_zones
+        # as an argument (dlr.zone_phase), so with spatial ratings ON, changing
+        # N changes WHICH region the heat wave hits when, not just how the grid
+        # is partitioned.  Total capacity removed is N-invariant (mean ratio
+        # 0.82279 at sigma=1 for N = 11, 22 and 33 alike) so it is not a
+        # severity change, but it is still a physics change riding along with
+        # the independent variable.  Use dlr_spatial=false for the N sweep.
+        dlr_spatial = config.pop("dlr_spatial", None)
+        dlr_kw = {} if dlr_spatial is None else {"dlr_spatial": bool(dlr_spatial)}
         if pact1_cfg.get("enabled", False):
             from .pact1.env import PACT1Env
             env_pz = PACT1Env(
                 **{f"pact1_{k}" if not k.startswith("pact1_") else k: v
                    for k, v in pact1_cfg.items()},
-                severity=severity, **config)
+                severity=severity, **dlr_kw, **config)
         elif severity > 0.0:
             from .pact1.dlr_env import PZMAEnvDLR
-            env_pz = PZMAEnvDLR(severity=severity, **config)
+            env_pz = PZMAEnvDLR(severity=severity, **dlr_kw, **config)
         else:
             env_pz = PZMAEnvRecoDNLimit(**config)
         return lambda: PettingZooWrapper(
