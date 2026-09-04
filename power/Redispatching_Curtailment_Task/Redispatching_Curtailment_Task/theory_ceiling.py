@@ -110,15 +110,31 @@ def make_env(regex):
     return env
 
 
-def decompose(obs, ptdf, zone_of_gen, curtail_ids, sigma):
+def line_ratios(obs, line_zone, n_zones, sigma, spatial):
+    """Per-line ampacity ratio vector (or a scalar broadcast when uniform)."""
+    if not spatial or line_zone is None:
+        return None, dlr.ampacity_ratio(obs.month, obs.hour_of_day, sigma)
+    pz = np.array([dlr.ampacity_ratio_zone(obs.month, obs.hour_of_day, z,
+                                           n_zones, sigma)
+                   for z in range(n_zones)], dtype=np.float64)
+    reg = float(pz.mean())
+    return np.where(line_zone >= 0, pz[np.clip(line_zone, 0, n_zones - 1)],
+                    reg), reg
+
+
+def decompose(obs, ptdf, zone_of_gen, curtail_ids, sigma,
+              line_zone=None, n_zones=11, spatial=False):
     """Split the derating-induced excess on the binding line into the three
     classes.  Returns (delta_total, frac_fixed, frac_own, frac_peer) or None
     when there is no excess to attribute at this step.
     """
-    ratio = dlr.ampacity_ratio(obs.month, obs.hour_of_day, sigma)
-    if ratio >= 1.0 - 1e-12:
-        return None                        # no derating right now
+    rvec, rreg = line_ratios(obs, line_zone, n_zones, sigma, spatial)
     l = int(np.argmax(obs.rho))
+    # The ratio that matters is the one on the BINDING line, which under
+    # spatial heterogeneity is its own zone's, not the regional average.
+    ratio = float(rvec[l]) if rvec is not None else float(rreg)
+    if ratio >= 1.0 - 1e-12:
+        return None                        # no derating on the binding line
     rho0 = float(obs.rho[l]) * ratio       # loading the static rating would show
     excess = rho0 * (1.0 / ratio - 1.0)
     if excess <= 1e-9:
@@ -169,6 +185,10 @@ def main():
     ap.add_argument("--episodes", type=int, default=8)
     ap.add_argument("--chronics", default="summer")
     ap.add_argument("--max-steps", type=int, default=400)
+    ap.add_argument("--spatial", action="store_true",
+                    help="per-zone ampacity (heterogeneous weather). Compare "
+                         "against the uniform run: the PEER column is the "
+                         "quantity that should rise.")
     args = ap.parse_args()
 
     env = make_env(PRESETS.get(args.chronics, args.chronics))
@@ -188,7 +208,16 @@ def main():
                                 renew):
             zone_of_gen["zone"][int(g)] = z
 
+    # line -> owning zone, for per-zone ratings
+    n_zones = len(ZONES)
+    line_zone = np.full(env.n_line, -1, dtype=int)
+    for zi, z in enumerate(ZONES):
+        for l in Z[z]["line_in_zone_idx"]:
+            if 0 <= int(l) < env.n_line:
+                line_zone[int(l)] = zi
+
     print(f"grid: {env.n_line} lines, {len(curtail_ids)} curtailable renewables")
+    print(f"ampacity: {'PER-ZONE (spatial)' if args.spatial else 'uniform'}")
     print(f"chronics: {args.chronics}   {args.episodes} episodes x "
           f"{args.max_steps} steps\n")
     print(f"{'sigma':>6} {'n_steps':>8} {'excess':>8} | {'irreducible':>12} "
@@ -200,11 +229,12 @@ def main():
         for ep in range(args.episodes):
             env.set_id(ep)
             obs = env.reset()
-            safe_set_limit(env, base * dlr.ampacity_ratio(
-                obs.month, obs.hour_of_day, s))
+            rv, rg = line_ratios(obs, line_zone, n_zones, s, args.spatial)
+            safe_set_limit(env, base * (rv if rv is not None else rg))
             done, steps = False, 0
             while not done and steps < args.max_steps:
-                d = decompose(obs, ptdf, zone_of_gen, curtail_ids, s)
+                d = decompose(obs, ptdf, zone_of_gen, curtail_ids, s,
+                              line_zone, n_zones, args.spatial)
                 if d is not None:
                     exc.append(d[0])
                     fixed.append(d[1])
@@ -214,8 +244,9 @@ def main():
                 obs, _, done, _ = env.step(env.action_space({}))
                 steps += 1
                 if not done:
-                    safe_set_limit(env, base * dlr.ampacity_ratio(
-                        obs.month, obs.hour_of_day, s))
+                    rv, rg = line_ratios(obs, line_zone, n_zones, s,
+                                         args.spatial)
+                    safe_set_limit(env, base * (rv if rv is not None else rg))
             # Restoring here is best-effort: after a game over grid2op refuses,
             # and it does not matter because the next episode resets first and
             # re-applies the ratio from a clean state.

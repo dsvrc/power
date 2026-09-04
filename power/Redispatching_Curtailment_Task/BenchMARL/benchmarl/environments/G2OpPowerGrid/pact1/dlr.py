@@ -146,6 +146,83 @@ def describe(sigma):
             f"at the static rating)   [{tag}]")
 
 
+# ---------------------------------------------------------------------------
+# SPATIAL HETEROGENEITY
+# ---------------------------------------------------------------------------
+# Ile-de-France spans roughly 100 km.  Ambient temperature, wind and insolation
+# are not uniform over that: a summer afternoon typically runs several degrees
+# hotter inland than on the western, more ventilated side, and cloud cover moves
+# across the region during the day.  Operators using dynamic ratings therefore
+# rate lines from LOCAL conditions, not one regional number.
+#
+# Uniform derating is the simplification; per-zone derating is the physics.
+#
+# WHY IT MATTERS FOR COORDINATION, and this is the point:
+# under uniform derating every agent sees the same 1/g amplification, so an
+# agent's own loading tells it everything it needs -- the fix is local and the
+# coordination gap stays small (measured 9.5% at sigma=1).  Under heterogeneous
+# derating the cheap fix for a hot zone's overload is often generation in a
+# COOLER neighbouring zone, where the same MW of curtailment buys more headroom.
+# An agent cannot identify that lever from its own loading alone.  The
+# coordination-recoverable fraction rises by construction, and it rises for a
+# physical reason rather than because a knob was turned until baselines fell.
+SPATIAL_AMP = 0.6          # fraction of the seasonal amplitude that varies by zone
+SPATIAL_PERIOD_H = 30.0    # hours for the hot cell to traverse the region
+
+
+def zone_phase(zone_index, n_zones):
+    """Position of a zone along the region's thermal gradient, in [0, 1).
+
+    Derived from the zone index so it is deterministic and reproducible; a
+    deployment would use each zone's real centroid.
+    """
+    return (float(zone_index) / max(int(n_zones), 1)) % 1.0
+
+
+def ambient_temp_zone(month, hour, zone_index, n_zones, sigma=1.0,
+                      spatial=True):
+    """Ambient at one zone: the regional cycle plus a travelling spatial term.
+
+    The spatial term is a wave crossing the region over SPATIAL_PERIOD_H hours,
+    so which zone is hottest CHANGES through the episode.  A fixed gradient
+    would let an agent learn a static "zone 7 is always hot" rule from its own
+    observations; a moving one cannot be inferred without knowing peers' state,
+    which is what makes the residual difficulty coordination rather than
+    memorisation.
+    """
+    base = ambient_temp(month, hour, sigma=sigma)
+    if not spatial or sigma == 0.0:
+        return base
+    ph = zone_phase(zone_index, n_zones)
+    wave = np.cos(2.0 * np.pi * (float(hour) / SPATIAL_PERIOD_H - ph))
+    return base + float(sigma) * SPATIAL_AMP * A_SEASONAL * wave
+
+
+def ampacity_ratio_zone(month, hour, zone_index, n_zones, sigma=1.0,
+                        derate_only=True, spatial=True):
+    """Per-zone ampacity ratio.  sigma = 0 still returns exactly 1.0."""
+    if sigma == 0.0:
+        return 1.0
+    t_amb = ambient_temp_zone(month, hour, zone_index, n_zones, sigma=sigma,
+                              spatial=spatial)
+    headroom = max(T_CONDUCTOR_MAX - float(t_amb), 1.0)
+    r = float(np.sqrt(headroom / (T_CONDUCTOR_MAX - T_RATING_REF)))
+    return min(1.0, r) if derate_only else r
+
+
+def spatial_spread(month, hour, n_zones, sigma=1.0):
+    """max/min ampacity ratio across zones at one instant.
+
+    1.0 means uniform derating (no coordination pressure from heterogeneity).
+    Report this alongside the coordination gap: it is the knob that connects
+    them, and it is a property of the weather model, not of any method.
+    """
+    rs = [ampacity_ratio_zone(month, hour, i, n_zones, sigma)
+          for i in range(n_zones)]
+    lo = min(rs)
+    return (max(rs) / lo) if lo > 0 else float("inf")
+
+
 def is_thermally_active(month, sigma=1.0, threshold=0.99):
     """Does derating bite in this month at all?
 

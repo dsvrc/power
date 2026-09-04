@@ -23,8 +23,10 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
     same calls in the same order.
     """
 
-    def __init__(self, severity=0.0, dlr_update_every=6, **kwargs):
+    def __init__(self, severity=0.0, dlr_update_every=6, dlr_spatial=True,
+                 **kwargs):
         super().__init__(**kwargs)
+        self.dlr_spatial = bool(dlr_spatial)
         self.severity = float(severity)
         # Ambient temperature moves on the scale of hours; grid2op steps are 5
         # minutes, so re-rating every step costs 6x more set_thermal_limit
@@ -36,12 +38,31 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
         self._base_limits = None
         self._dlr_step = 0
         self._last_ratio = 1.0
+        self._last_spread = 1.0
         self._last_A = 0.0
         # Counters, so "the dial silently stopped applying" is visible rather
         # than invisible.  A high skip fraction means the limits are not
         # reaching the physics and the severity arm is really a sigma=0 arm.
         self._dlr_applied = 0
         self._dlr_skipped = 0
+
+        # Map each line to the zone whose local weather rates it.  Lines not
+        # owned by any zone keep the regional (zone-averaged) ratio.
+        self._line_zone = None
+        if self.severity > 0.0 and self.dlr_spatial:
+            try:
+                from ..utils import ZONES_DICT
+                names = sorted(ZONES_DICT.keys())
+                n_line = len(self.env_g2op.get_thermal_limit())
+                lz = np.full(n_line, -1, dtype=int)
+                for zi, z in enumerate(names):
+                    for l in ZONES_DICT[z]["line_in_zone_idx"]:
+                        if 0 <= int(l) < n_line:
+                            lz[int(l)] = zi
+                self._line_zone = lz
+                self._n_zones_dlr = len(names)
+            except Exception:                                # noqa: BLE001
+                self._line_zone = None
 
         if self.severity > 0.0:
             try:
@@ -55,6 +76,14 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
             print("  DYNAMIC LINE RATING ACTIVE".ljust(72))
             print(f"  {dlr.describe(self.severity)}")
             print(f"  applied to ALL arms; n_line={len(self._base_limits)}")
+            if self._line_zone is not None:
+                sp = dlr.spatial_spread(7, 15, self._n_zones_dlr, self.severity)
+                print(f"  SPATIAL: per-zone ratings, {self._n_zones_dlr} zones, "
+                      f"max/min spread at the summer peak = {sp:.3f}x")
+                print(f"  (uniform = 1.000x; spread is what creates the "
+                      f"coordination gap)")
+            else:
+                print("  UNIFORM ratings (spatial disabled)")
             print("=" * 72)
 
     # ------------------------------------------------------------------
@@ -83,14 +112,31 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
             return
         month = float(getattr(g2op_obs, "month", 1))
         hour = float(getattr(g2op_obs, "hour_of_day", 0))
-        ratio = dlr.ampacity_ratio(month, hour, self.severity)
-        self._last_ratio = ratio
         self._last_A = dlr.driver_level(month, hour, self.severity)
-        # One scalar ratio across all lines: ambient is a regional quantity, and
-        # a per-line ratio would need per-line weather this dataset does not
-        # have.  Uniform scaling also keeps the dial from re-shaping WHICH line
-        # binds, so sigma changes severity without changing the task's identity.
-        if self._set_limits(self._base_limits * ratio):
+
+        if self._line_zone is not None:
+            # PER-ZONE ratings.  Weather is not uniform over a 100 km region,
+            # and this is what creates coordination pressure: when one zone is
+            # derated and its neighbour is not, the efficient lever for the hot
+            # zone's overload sits in the cool zone, and no agent can find it
+            # from its own loading alone.
+            n = self._n_zones_dlr
+            per_zone = np.array(
+                [dlr.ampacity_ratio_zone(month, hour, zi, n, self.severity)
+                 for zi in range(n)], dtype=np.float64)
+            regional = float(per_zone.mean())
+            ratios = np.where(self._line_zone >= 0,
+                              per_zone[np.clip(self._line_zone, 0, n - 1)],
+                              regional)
+            self._last_ratio = float(ratios.mean())
+            self._last_spread = float(per_zone.max() / max(per_zone.min(), 1e-9))
+            ok = self._set_limits(self._base_limits * ratios)
+        else:
+            ratio = dlr.ampacity_ratio(month, hour, self.severity)
+            self._last_ratio = ratio
+            self._last_spread = 1.0
+            ok = self._set_limits(self._base_limits * ratio)
+        if ok:
             self._dlr_applied += 1
 
     def step(self, gym_action):
