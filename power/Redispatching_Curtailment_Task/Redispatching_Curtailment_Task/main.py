@@ -240,6 +240,32 @@ def cli():
                                 independent variable. Uniform is also what
                                 theory_scaling.py and theory_ceiling.py default
                                 to. (default: the env class default, per-zone)""")
+    parser.add_argument('--dlr_weather', type=str, default=None,
+                        choices=["clock", "stochastic", "wind"],
+                        help="""Weather obstacle. TASK physics: applied to every
+                                algorithm. 'clock' (shipped) makes ambient a
+                                deterministic function of (month, hour) -- BOTH
+                                ALREADY IN THE OBSERVATION -- so the whole
+                                disturbance is a lookup table any learner can
+                                memorise. That is climatology, not weather, and
+                                the existence of DLR as a practice is proof
+                                ampacity is not calendar-predictable.
+                                'stochastic' adds an AR(1) departure;
+                                'wind' also adds wind-driven convection, IEEE
+                                738's dominant term and the one with no diurnal
+                                cycle. Keep 'clock' as the CONTROL condition.
+                                NOTE: 'wind' has no winter placebo.
+                                (default: config value, 'clock')""")
+    parser.add_argument('--dlr_geographic', type=str, default=None,
+                        choices=["true", "false"],
+                        help="""Weather as a spatial field over the grid's own
+                                coordinates instead of a wave indexed by zone
+                                NUMBER. Two effects: it cannot be memorised, and
+                                it is independent of N -- dlr.zone_phase() makes
+                                the weather a function of how finely you
+                                partitioned. (default: config value, false)""")
+    parser.add_argument('--dlr_points', type=int, default=None,
+                        help="Weather cells for --dlr_geographic. (default: 8)")
     parser.add_argument('--pact1_trust', type=float, default=0.90,
                         help="""PACT-1 trust prior. Initialise NEAR the optimum and let
                                 the policy pull it down -- a hedged 0.5 measured ~1800
@@ -475,6 +501,12 @@ if __name__ == "__main__":
         task.config["safe_max_rho"] = args.safe_max_rho
     if args.dlr_spatial is not None:
         task.config["dlr_spatial"] = (args.dlr_spatial == "true")
+    if args.dlr_weather is not None:
+        task.config["dlr_weather"] = args.dlr_weather
+    if args.dlr_geographic is not None:
+        task.config["dlr_geographic"] = (args.dlr_geographic == "true")
+    if args.dlr_points is not None:
+        task.config["dlr_points"] = args.dlr_points
 
     # Zone partition. Applied AFTER the yaml merge for the same reason as the
     # chronics filter above: the merge does config.config.update(...) and would
@@ -637,7 +669,9 @@ if __name__ == "__main__":
           f"safe_max_rho={task.config.get('safe_max_rho')}  "
           f"n_zones={len(task.config.get('zone_names') or [])}  "
           f"zones_file={os.path.basename(task.config.get('zones_file') or 'zones_definitions.json')}  "
-          f"dlr_spatial={'default(per-zone)' if _spatial is None else _spatial}")
+          f"dlr_spatial={'default(per-zone)' if _spatial is None else _spatial}  "
+          f"weather={task.config.get('dlr_weather')}"
+          f"{'+geo' if task.config.get('dlr_geographic') else ''}")
     if _N_ZONES is not None and args.severity > 0.0 and _spatial is not False:
         print("[task] WARNING: --n_zones with per-zone ampacity. The spatial "
               "weather model\n"

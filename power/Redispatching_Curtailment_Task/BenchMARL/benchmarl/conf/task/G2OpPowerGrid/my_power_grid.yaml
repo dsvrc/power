@@ -25,3 +25,9 @@ severity: 0.0
 # against every run made before the key existed. Set false for an N sweep:
 # dlr.zone_phase() takes n_zones, so per-zone weather moves when N moves.
 dlr_spatial: null
+# Weather obstacle. 'clock' = the shipped deterministic climatology, which is
+# a closed-form function of (month, hour) -- both in the observation -- and so
+# is memorisable by any learner. Kept as the CONTROL condition.
+dlr_weather: clock
+dlr_geographic: false
+dlr_points: 8

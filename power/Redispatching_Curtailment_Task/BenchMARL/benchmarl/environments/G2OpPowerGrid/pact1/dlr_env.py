@@ -24,10 +24,21 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
     """
 
     def __init__(self, severity=0.0, dlr_update_every=6, dlr_spatial=True,
-                 **kwargs):
+                 dlr_weather="clock", dlr_geographic=False, dlr_points=8,
+                 dlr_weather_seed=0, **kwargs):
         super().__init__(**kwargs)
         self.dlr_spatial = bool(dlr_spatial)
         self.severity = float(severity)
+        # Weather obstacle. "clock" reproduces the shipped deterministic
+        # climatology byte for byte and is the CONTROL condition; the others
+        # remove the simplification that makes the disturbance a lookup table
+        # over (month, hour). See pact1/weather.py.
+        self.dlr_weather = str(dlr_weather)
+        self.dlr_geographic = bool(dlr_geographic)
+        self._weather = None
+        self._episode_idx = -1
+        self._dlr_weather_seed = int(dlr_weather_seed)
+        self._dlr_points = int(dlr_points)
         # Ambient temperature moves on the scale of hours; grid2op steps are 5
         # minutes, so re-rating every step costs 6x more set_thermal_limit
         # calls than the physics justifies.  Measured in July at sigma=1, the
@@ -84,6 +95,39 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
                       f"coordination gap)")
             else:
                 print("  UNIFORM ratings (spatial disabled)")
+
+            # Weather obstacle. Built only at severity > 0; at severity == 0
+            # nothing here runs and the task is stock grid2op byte for byte.
+            if self.dlr_weather != "clock" or self.dlr_geographic:
+                from . import weather as _wx
+                layout = None
+                try:
+                    gl = self.env_g2op.grid_layout
+                    layout = {i: gl[n] for i, n
+                              in enumerate(self.env_g2op.name_sub) if n in gl}
+                except Exception:                            # noqa: BLE001
+                    layout = None
+                n_line = len(self._base_limits)
+                if self.dlr_geographic:
+                    lp, npts = _wx.geographic_points(
+                        n_line, self.env_g2op.line_or_to_subid,
+                        self.env_g2op.line_ex_to_subid, layout=layout,
+                        n_points=self._dlr_points)
+                else:
+                    lp, npts = np.zeros(n_line, dtype=int), 1
+                self._weather = _wx.WeatherProcess(
+                    n_line, lp, sigma=self.severity, mode=self.dlr_weather,
+                    geographic=self.dlr_geographic, n_points=npts,
+                    seed=self._dlr_weather_seed)
+                print(f"  WEATHER OBSTACLE: {self._weather.describe()}")
+                print(f"  geo layout: "
+                      f"{'grid_layout coordinates' if layout else 'substation-id fallback'}")
+                if self.dlr_weather == "wind":
+                    print("  NOTE: wind mode has NO winter placebo -- a still "
+                          "cold night derates.")
+                print("  the realised ratio is NOT a function of the clock, so "
+                      "it cannot be\n  memorised from (month, hour); it is "
+                      "published to every arm alike.")
             print("=" * 72)
 
     # ------------------------------------------------------------------
@@ -113,6 +157,18 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
         month = float(getattr(g2op_obs, "month", 1))
         hour = float(getattr(g2op_obs, "hour_of_day", 0))
         self._last_A = dlr.driver_level(month, hour, self.severity)
+
+        if self._weather is not None:
+            # Stochastic and/or geographic weather. The process advances once
+            # per DLR update -- this point is already gated to that cadence --
+            # so its AR(1) retention is in units of dlr_update_every steps.
+            self._weather.step()
+            ratios = self._weather.line_ratios(month, hour)
+            self._last_ratio = float(ratios.mean())
+            self._last_spread = float(ratios.max() / max(ratios.min(), 1e-9))
+            if self._set_limits(self._base_limits * ratios):
+                self._dlr_applied += 1
+            return
 
         if self._line_zone is not None:
             # PER-ZONE ratings.  Weather is not uniform over a 100 km region,
@@ -155,6 +211,19 @@ class PZMAEnvDLR(PZMAEnvRecoDNLimit):
         # here still gives each episode the same starting grid, because the
         # ambient ratio is re-applied immediately afterwards.
         obs, info = super().reset(seed=seed, options=options)
+        if self._weather is not None:
+            # A new episode is new weather. Keyed on the chronic actually
+            # loaded, not on a running counter, so replaying scenario k gives
+            # the weather it had last time -- which is what lets a severity or
+            # method sweep pin scenarios and still have the weather be the same
+            # (NS_FORM_SPEC E.2.5: an extra reset silently advancing the
+            # scenario made every sigma run on different episodes).
+            ep = getattr(self.env_g2op.chronics_handler, "get_id", lambda: None)()
+            if not isinstance(ep, (int, np.integer)):
+                self._episode_idx += 1
+                ep = self._episode_idx
+            self._weather.reset(int(ep) if isinstance(ep, (int, np.integer))
+                                else abs(hash(str(ep))) % (2 ** 31 - 1))
         if self.severity > 0.0 and self._base_limits is not None:
             self._set_limits(self._base_limits)
             self._apply_dlr(getattr(self, "_previous_act", None))

@@ -59,6 +59,11 @@ class G2OpPowerGridClass(TaskClass):
         # the independent variable.  Use dlr_spatial=false for the N sweep.
         dlr_spatial = config.pop("dlr_spatial", None)
         dlr_kw = {} if dlr_spatial is None else {"dlr_spatial": bool(dlr_spatial)}
+        for _k, _cast in (("dlr_weather", str), ("dlr_geographic", bool),
+                          ("dlr_points", int)):
+            _v = config.pop(_k, None)
+            if _v is not None:
+                dlr_kw[_k] = _cast(_v)
         if pact1_cfg.get("enabled", False):
             from .pact1.env import PACT1Env
             env_pz = PACT1Env(

@@ -34,3 +34,10 @@ class TaskConfig:
     # an N sweep must set this to false or N moves the weather as well as the
     # partition.
     dlr_spatial: bool = MISSING
+    # Weather obstacle: 'clock' (shipped, deterministic climatology and the
+    # CONTROL condition), 'stochastic', or 'wind'. See pact1/weather.py.
+    dlr_weather: str = MISSING
+    # Spatial field over the grid's own geometry instead of a wave indexed
+    # by zone number -- also makes the weather independent of N.
+    dlr_geographic: bool = MISSING
+    dlr_points: int = MISSING
