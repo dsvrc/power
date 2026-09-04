@@ -66,12 +66,23 @@ The 18 fields are the ones the shipped file carries, and they mean:
   load_* / storage_*      same inside / border / large pattern
 
 NOTE, and it matters when comparing to the shipped file: the shipped 11 zones
-are HAND-DRAWN and do not follow these rules.  They cover only 101 of the 118
-substations, leaving 17 on the seams owned by nobody, and their border fields
-are mutually inconsistent (Zone0 lists gen_border 7,8,9 while its
-sub_border_in_ids is empty, and those same generators are Zone1's gen_inside).
-So `--compare-shipped` reports structure, not equality.  The consumers that
-actually read these files -- utils.get_obs_act_attr_and_kwargs, pact1/basis.py,
+are HAND-DRAWN and split a zone's TERRITORY across two fields.  Their
+`sub_inside_ids` cover only 101 of the 118 substations, but
+`sub_inside_ids | sub_border_in_ids` is a disjoint partition of 117 of them
+(only substation 115 belongs to nobody), and `line_in_zone_idx` is "both
+endpoints in that territory" -- which is why they own 170 of 186 lines.  Read
+`sub_border_in_ids` as "more of my territory", not as "my boundary".
+
+This file uses the stricter reading -- territory IS `sub_inside_ids`, and
+`sub_border_in_ids` is the subset of it that touches a tie-line -- so the two
+disagree on what that field means while agreeing on everything a consumer
+reads.  `--compare-shipped` therefore compares territory as
+`sub_inside | sub_border_in`, which is correct for both.
+
+Their other border fields really are mutually inconsistent: Zone0 lists
+gen_border 7, 8, 9 while its own sub_border_in_ids is empty, and those same
+generators are Zone1's gen_inside.  Nothing reads them.  The consumers that do
+read these files -- utils.get_obs_act_attr_and_kwargs, pact1/basis.py,
 pact1/env.py, pact1/dlr_env.py, theory_ceiling.py -- use only line_in_zone_idx,
 line_large_idx, gen_inside_idx, gen_large_idx, load_large_idx,
 storage_inside_idx and storage_border_idx, and all seven are well defined here.
@@ -863,30 +874,41 @@ def print_report(zones, topo, n_zones, stats, warn):
 def compare_shipped(zones, shipped_path):
     """Structural comparison against the hand-drawn 11-zone file.
 
-    Deliberately not an equality test.  The shipped zones cover 101 of 118
-    substations, leave 17 on the seams owned by nobody, and their border fields
-    follow no single rule -- so an exact diff would be noise.  What is worth
-    checking is that the generated file is not structurally WORSE: comparable
-    tie-line fraction, comparable per-zone sizes, no zone starved of lines.
+    Deliberately not an equality test: the shipped zones are hand-drawn and put
+    a zone's territory in `sub_inside_ids | sub_border_in_ids` rather than in
+    `sub_inside_ids` alone, so an exact diff would be noise.  Territory is
+    measured here as the union of the two, which is right for both files --
+    generated ones have sub_border_in as a SUBSET of sub_inside, so the union
+    is just sub_inside.
+
+    What is worth checking is that the generated file is not structurally
+    WORSE: comparable coverage, comparable per-zone sizes, no zone starved of
+    lines or of levers.
     """
     with open(shipped_path, "r", encoding="utf-8") as f:
         ship = json.load(f)
+
+    def territory(v):
+        return set(v["sub_inside_ids"]) | set(v["sub_border_in_ids"])
+
     s_sub, s_owned = set(), set()
     for v in ship.values():
-        s_sub |= set(v["sub_inside_ids"])
+        s_sub |= territory(v)
         s_owned |= set(v["line_in_zone_idx"])
     g_sub, g_owned = set(), set()
     for v in zones.values():
-        g_sub |= set(v["sub_inside_ids"])
+        g_sub |= territory(v)
         g_owned |= set(v["line_in_zone_idx"])
     print("\n  --- against the shipped hand-drawn partition ---")
     print(f"  zones            shipped {len(ship):3d}   generated {len(zones):3d}")
     print(f"  substations held shipped {len(s_sub):3d}   generated {len(g_sub):3d}"
-          f"   (shipped leaves {len(g_sub - s_sub)} on the seams)")
+          f"   (territory = sub_inside | sub_border_in)")
+    if g_sub - s_sub:
+        print(f"  shipped omits    {sorted(g_sub - s_sub)}")
     print(f"  lines owned      shipped {len(s_owned):3d}   "
           f"generated {len(g_owned):3d}")
-    ss = np.array([len(v['sub_inside_ids']) for v in ship.values()])
-    gs = np.array([len(v['sub_inside_ids']) for v in zones.values()])
+    ss = np.array([len(territory(v)) for v in ship.values()])
+    gs = np.array([len(territory(v)) for v in zones.values()])
     print(f"  subs/zone spread shipped {ss.min()}-{ss.max()} (sd {ss.std():.1f})"
           f"   generated {gs.min()}-{gs.max()} (sd {gs.std():.1f})")
     sc = np.array([len(v['gen_curtail_inside_idx']) for v in ship.values()])
@@ -895,8 +917,19 @@ def compare_shipped(zones, shipped_path):
           f"({int((sc == 0).sum())} zones with none)   "
           f"generated {gc.min()}-{gc.max()} "
           f"({int((gc == 0).sum())} zones with none)")
-    print("  NOTE: not an equality test -- the shipped zones are hand-drawn and")
-    print("  follow no single documented rule.  See this file's docstring.")
+    s_curt = set()
+    for v in ship.values():
+        s_curt |= set(v["gen_curtail_inside_idx"])
+    g_curt = set()
+    for v in zones.values():
+        g_curt |= set(v["gen_curtail_inside_idx"])
+    print(f"  curtailable TOTAL shipped {len(s_curt):3d}  generated {len(g_curt):3d}"
+          f"{'   <- differs: gate_severity curtails this set, so its privileged'
+             ' arm is NOT comparable across the two' if s_curt != g_curt else ''}")
+    if g_curt - s_curt:
+        print(f"  shipped omits gen {sorted(g_curt - s_curt)}")
+    print("  NOTE: not an equality test -- the shipped zones are hand-drawn.")
+    print("  See this file's docstring.")
 
 
 # --------------------------------------------------------------------------

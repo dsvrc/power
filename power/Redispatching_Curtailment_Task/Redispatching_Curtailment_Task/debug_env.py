@@ -20,11 +20,20 @@ import numpy as np                                            # noqa: E402
 
 from utils import G2OP_ENV_DIR                                # noqa: E402
 
+# Kept IDENTICAL to main.py's table on purpose.  These used to disagree:
+# "summer" here meant Jun-Aug (208 chronics) while in main.py it meant July
+# (~69), so a debug run "reproducing" a training config silently loaded three
+# times the data and reported 13 GB RSS and a 153 GB memory projection -- the
+# documented OOM trap -- for a configuration training never actually uses.
+# A debug tool that does not reproduce the thing being debugged is worse than
+# no debug tool.  Change both tables together.
 CHRONICS_PRESETS = {
-    "summer": r".*-0[678]-.*$",
-    "winter": r".*-(12|01|02)-.*$",
-    "feb": r".*-02-.*$",
-    "all": None,
+    "summer": r".*-07-.*$",            # July: peak derating, ~69 chronics
+    "winter": r".*-02-.*$",            # February: ratio is exactly 1.000
+    "jja": r".*-0[678]-.*$",           # Jun-Aug: ~208 chronics, ~13 GB/worker
+    "djf": r".*-(12|01|02)-.*$",       # Dec-Feb: same memory warning
+    "feb": r".*-02-.*$",               # alias for the previous default
+    "all": None,                       # 832 chronics: will not fit
 }
 
 
