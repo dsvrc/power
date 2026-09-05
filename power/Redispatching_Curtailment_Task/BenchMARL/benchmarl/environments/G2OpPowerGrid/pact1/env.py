@@ -63,7 +63,8 @@ class PACT1Env(PZMAEnvDLR):
                  pact1_own_gain_floor=1e-3,
                  pact1_gate="prediction",   # "prediction" | "trace" (ablation) | "none"
                  pact1_hp_tau=2000.0,       # standing-level EMA, in env steps
-                 pact1_sensor="max",        # "mean" | "max" over the zone's own lines
+                 pact1_sensor="max",        # "mean" | "max" over the zone's lines
+                 pact1_sensor_lines="own",  # "own" | "large" (adds tie-lines)
                  pact1_r=1,                 # peer channels, split by PTDF strength
                  pact1_fit_floor=0.005,     # min measured fit_gain before acting
                  pact1_min_t=3.0,           # min |coef|/se on the divisor
@@ -83,6 +84,32 @@ class PACT1Env(PZMAEnvDLR):
         self.own_gain_floor = float(pact1_own_gain_floor)
         self.gate_kind = str(pact1_gate)
         self.sensor_kind = str(pact1_sensor)
+        # WHICH lines the compensator watches.
+        #
+        #   own    line_in_zone_idx -- both endpoints inside. The shipped
+        #          behaviour, kept as the default so nothing changes silently.
+        #   large  line_large_idx -- the above PLUS the tie-lines touching
+        #          this zone.
+        #
+        # "own" is a measurement handicap, not a fairness property. The
+        # observation already gives the POLICY rho over line_large_idx
+        # (utils.get_obs_act_attr_and_kwargs), so the blind baseline sees the
+        # tie-lines and the compensator does not -- while theory_scaling puts
+        # 59% of binding events at N=22 ON those tie-lines, and the ceiling
+        # decomposition calls exactly those the coordination-recoverable part.
+        # The compensator was therefore blind to most of the constraints it
+        # exists to address, and blind using LESS information than the arm it
+        # is compared against.
+        #
+        # A tie-line is watched by BOTH zones it joins, which is how an
+        # interconnector is actually operated -- and it makes the double
+        # compensation T4 predicts a real, measurable effect rather than a
+        # hypothetical one.
+        if str(pact1_sensor_lines) not in ("own", "large"):
+            raise ValueError("pact1_sensor_lines must be 'own' or 'large'")
+        self.sensor_lines = str(pact1_sensor_lines)
+        self._line_key = ("line_in_zone_idx" if self.sensor_lines == "own"
+                          else "line_large_idx")
         self.fit_floor = float(pact1_fit_floor)
         self.min_t = float(pact1_min_t)
         self.dlr_feedforward = bool(pact1_dlr_feedforward)
@@ -136,7 +163,7 @@ class PACT1Env(PZMAEnvDLR):
         for z in zone_names:
             gi = np.asarray(ZONES_DICT[z]["gen_inside_idx"], dtype=int)
             gen_curtail_inside[z] = np.intersect1d(gi, np.where(env.gen_renewable)[0])
-            line_in_zone[z] = np.asarray(ZONES_DICT[z]["line_in_zone_idx"], dtype=int)
+            line_in_zone[z] = np.asarray(ZONES_DICT[z][self._line_key], dtype=int)
         self._n_curtail = {z: len(gen_curtail_inside[z]) for z in zone_names}
         self._line_in_zone = line_in_zone
 
@@ -144,7 +171,7 @@ class PACT1Env(PZMAEnvDLR):
         # fitted from run data (IV.1).  A geometric stand-in measured
         # fit_gain = -0.0045 here, so failing to get a PTDF is fatal rather
         # than silently degrading to the version that does not work.
-        W = ptdf_zone_coupling(env, zone_names)
+        W = ptdf_zone_coupling(env, zone_names, line_key=self._line_key)
         if W is None:
             raise RuntimeError(
                 "PACT-1 needs injection->flow sensitivities and this backend "
@@ -154,7 +181,8 @@ class PACT1Env(PZMAEnvDLR):
         self.n_zones = self.basis.n
         # Analytic self-sensitivity: the divisor comes from the same declared
         # operator instead of from the RLS, which could never identify it.
-        self._selfS = self_sensitivity_rows(env, zone_names)
+        self._selfS = self_sensitivity_rows(env, zone_names,
+                                            line_key=self._line_key)
         self._gen_pmax = np.asarray(env.gen_pmax, dtype=np.float64)
 
         self.est = {a: RLSEstimator(self.basis.r, mu=pact1_mu, p0=pact1_p0)
@@ -199,7 +227,8 @@ class PACT1Env(PZMAEnvDLR):
             f"zone agents      : {len(self._zone_agents)}",
             f"trust init       : {self.trust_init}   (III.5 inverted prior)",
             f"confidence gate  : {self.gate_kind}",
-            f"own-harm sensor  : {self.sensor_kind} rho over the zone's own lines",
+            f"own-harm sensor  : {self.sensor_kind} rho over the zone's "
+            f"{'own lines only' if self.sensor_lines == 'own' else 'lines INCLUDING tie-lines'}",
             f"RLS mu / p0      : {pact1_mu} / {pact1_p0}",
             f"max |delta|      : {self.max_delta} action units",
             f"max applied gain : {self.max_trust}   (T4 cap, III.8)",

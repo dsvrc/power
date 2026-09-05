@@ -311,6 +311,23 @@ def cli():
                                 'max' carries more signal; 'mean' over 23-35 lines can
                                 dilute the peer effect toward zero. Both are logged
                                 every row either way. (default: mean)""")
+    parser.add_argument('--pact1_sensor_lines', type=str, default=None,
+                        choices=["own", "large"],
+                        help="""Which lines the compensator watches. 'own'
+                                (shipped default) = line_in_zone_idx, both
+                                endpoints inside. 'large' = line_large_idx,
+                                which adds the tie-lines touching the zone.
+                                NOT a fairness question: the observation
+                                already gives the POLICY rho over
+                                line_large_idx, so 'own' hands the compensator
+                                LESS information than the blind baseline has --
+                                while 59%% of binding events at N=22 sit on
+                                tie-lines, and the ceiling decomposition calls
+                                exactly those the coordination-recoverable
+                                part. A tie-line is then watched by both zones
+                                it joins, as a real interconnector is, which
+                                makes T4's double compensation measurable.
+                                (default: config value, 'own')""")
     parser.add_argument('--pact1_log', type=str, default="pact_debug.csv",
                         help="PACT-1 diagnostics CSV. Read applied_trust first.")
     parser.add_argument('--save_experiment', action='store_true', 
@@ -450,6 +467,8 @@ if __name__ == "__main__":
             "sensor": args.pact1_sensor,
             "max_trust": args.pact1_max_trust,
             "ff_gain": args.pact1_ff_gain,
+            **({"sensor_lines": args.pact1_sensor_lines}
+               if args.pact1_sensor_lines is not None else {}),
             "log": os.path.join(ROOT_DIR, args.pact1_log),
         }
         if args.pact1_r is not None:

@@ -93,8 +93,20 @@ def get_ptdf(env):
     return None
 
 
-def ptdf_zone_coupling(env, zone_names, ptdf=None):
-    """W[i, j] = mean |PTDF| from j's curtailable generators onto i's OWN lines.
+def ptdf_zone_coupling(env, zone_names, ptdf=None,
+                       line_key="line_in_zone_idx"):
+    """W[i, j] = mean |PTDF| from j's curtailable generators onto i's lines.
+
+    `line_key` selects WHICH lines count as "i's":
+      line_in_zone_idx  both endpoints inside  -- the lines i alone owns
+      line_large_idx    the above PLUS tie-lines touching i
+
+    This matters more than it looks.  At N=22 tie-lines carry 59% of binding
+    events, and the observation already hands the policy rho over
+    line_large_idx -- so restricting the OPERATOR to line_in_zone_idx gives
+    the compensator strictly less information than the blind baseline has,
+    on exactly the constraints the ceiling decomposition calls
+    coordination-recoverable.
 
     Zero-diagonal by construction (I.7 rule 1): j == i is never accumulated, so
     the single-agent projection of the coupling is exactly 0 whatever the grid
@@ -113,7 +125,7 @@ def ptdf_zone_coupling(env, zone_names, ptdf=None):
 
     W = np.zeros((n, n))
     for a, zi in enumerate(zone_names):
-        lines_i = np.asarray(zones[zi]["line_in_zone_idx"], dtype=int)
+        lines_i = np.asarray(zones[zi][line_key], dtype=int)
         lines_i = lines_i[lines_i < ptdf.shape[0]]
         if not len(lines_i):
             continue
@@ -132,7 +144,8 @@ def ptdf_zone_coupling(env, zone_names, ptdf=None):
     return W
 
 
-def self_sensitivity_rows(env, zone_names, ptdf=None):
+def self_sensitivity_rows(env, zone_names, ptdf=None,
+                          line_key="line_in_zone_idx"):
     """S[i, g] = d(flow on i's lines) / d(injection at i's OWN gen g), in MW/MW.
 
     The coupling basis is zero-diagonal by construction, because the diagonal is
@@ -158,7 +171,7 @@ def self_sensitivity_rows(env, zone_names, ptdf=None):
 
     out = {}
     for zi in zone_names:
-        lines_i = np.asarray(zones[zi]["line_in_zone_idx"], dtype=int)
+        lines_i = np.asarray(zones[zi][line_key], dtype=int)
         lines_i = lines_i[lines_i < ptdf.shape[0]]
         gi = np.intersect1d(
             np.asarray(zones[zi]["gen_inside_idx"], dtype=int), renewable)

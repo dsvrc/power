@@ -180,8 +180,8 @@ def collect(args, mode, geographic):
 
 def run(args):
     out = {}
-    print(f"{'mode':>22s} {'clock R^2':>10s} {'ratio mean':>11s} "
-          f"{'ratio std':>10s} {'spread':>8s}  verdict")
+    print(f"{'mode':>22s} {'meanR^2':>10s} {'lineR^2':>10s} {'ratio mean':>11s} "
+          f"{'ratio std':>10s} {'spread':>8s}  verdict (reads lineR^2)")
     for mode in args.modes:
         for geo in ([False, True] if args.geographic else [False]):
             rows, per_line, npts = collect(args, mode, geo)
@@ -189,12 +189,29 @@ def run(args):
                                n_harm=args.harmonics)
             y = rows[:, 4]
             score = r2(X, y)
+
+            # PER-LINE R^2, and it is the one to read whenever the weather is
+            # a spatial field.  The regional MEAN of k independent cells has
+            # ~1/sqrt(k) of a single cell's stochastic variance, so averaging
+            # hands the deterministic climatology back its share and the mean
+            # looks MORE memorisable the more cells you add -- measured here as
+            # 0.484 -> 0.915 (stochastic) and 0.167 -> 0.752 (wind) going from
+            # 1 to 8 cells, which reads as the obstacle failing when it is only
+            # the metric averaging.  No agent is rated by the regional mean; it
+            # is rated by the lines it owns.
+            per_line_r2 = [r2(X, per_line[:, j])
+                           for j in range(per_line.shape[1])]
+            per_line_r2 = [v for v in per_line_r2 if np.isfinite(v)]
+            line_score = float(np.median(per_line_r2)) if per_line_r2 else float("nan")
+
             spread = float(np.mean(per_line.max(axis=1)
                                    / np.maximum(per_line.min(axis=1), 1e-9)))
             tag = f"{mode}{'+geo' if geo else ''}"
-            print(f"{tag:>22s} {score:10.4f} {y.mean():11.4f} {y.std():10.4f} "
-                  f"{spread:8.4f}  {verdict(score)}")
-            out[tag] = {"clock_r2": score, "ratio_mean": float(y.mean()),
+            print(f"{tag:>22s} {score:10.4f} {line_score:10.4f} "
+                  f"{y.mean():11.4f} {y.std():10.4f} "
+                  f"{spread:8.4f}  {verdict(line_score)}")
+            out[tag] = {"clock_r2": score, "clock_r2_per_line": line_score,
+                        "ratio_mean": float(y.mean()),
                         "ratio_std": float(y.std()), "spatial_spread": spread,
                         "n_samples": int(len(y)), "n_points": int(npts)}
     return out
