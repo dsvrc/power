@@ -165,6 +165,17 @@ class PACT1Env(PZMAEnvDLR):
             gen_curtail_inside[z] = np.intersect1d(gi, np.where(env.gen_renewable)[0])
             line_in_zone[z] = np.asarray(ZONES_DICT[z][self._line_key], dtype=int)
         self._n_curtail = {z: len(gen_curtail_inside[z]) for z in zone_names}
+        # Which agent cond_psi is measured on.  This used to be hardcoded to
+        # index 0, which was fine at N=11 (Zone0 has 5 curtailable generators)
+        # and useless at N=22, where index 0 is Zone0 with ZERO of them: its
+        # exertion is identically zero, so own_col is a constant, exactly
+        # collinear with the intercept, and gram_cond returns inf on every row
+        # BY CONSTRUCTION.  Measured: inf in 1548/1548 rows, and again in all
+        # three calibration runs -- a diagnostic that cannot report anything
+        # else is not a diagnostic.  Pick the first agent that can actually act.
+        self._cond_agent_idx = next(
+            (i for i, z in enumerate(zone_names) if self._n_curtail[z] > 0), 0)
+        self._cond_agent_name = zone_names[self._cond_agent_idx]
         self._line_in_zone = line_in_zone
 
         # The coupling operator comes from the grid model, computed once, never
@@ -232,6 +243,8 @@ class PACT1Env(PZMAEnvDLR):
             f"RLS mu / p0      : {pact1_mu} / {pact1_p0}",
             f"max |delta|      : {self.max_delta} action units",
             f"max applied gain : {self.max_trust}   (T4 cap, III.8)",
+            f"cond_psi agent   : {self._cond_agent_name} "
+            f"(index {self._cond_agent_idx}; must be able to act or cond is inf)",
             f"log              : {pact1_log or '(off)'}",
         ]) + "\n" + self.basis.report())
 
@@ -529,7 +542,7 @@ class PACT1Env(PZMAEnvDLR):
             self._prev_psi[agent] = psi_next
             ell_norms.append(abs(self.est[agent].peer_component(psi_next)))
 
-            if a_i == 0:
+            if a_i == self._cond_agent_idx:
                 self._psi_hist.append(psi_next.copy())
                 if len(self._psi_hist) > 4000:
                     self._psi_hist.pop(0)
